@@ -1,0 +1,29 @@
+# Workspace outputs
+/generated/
+/code-inventory.md
+/pathignore.md
+/PyTorch-Windows-CUDA-Build-Notes.md
+/VS2022-DevCmd.md
+
+# SpecBuilder build artifacts
+/SpecBuilder/bin/
+/SpecBuilder/obj/
+/SpecBuilder/TestResults/
+/SpecBuilder/.vs/
+
+# Common .NET build outputs anywhere in the workspace
+**/bin/
+**/obj/
+**/TestResults/
+**/.vs/
+
+# IDE and editor cruft
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.log
+
+# Optional local model caches
+*.tmp
+*.cache

@@ -1,0 +1,14 @@
+C:\github\SpecBuilder\bin\Debug\net10.0\SpecBuilder.exe
+C:\github\SpecBuilder\bin\Debug\net10.0\SpecBuilder.deps.json
+C:\github\SpecBuilder\bin\Debug\net10.0\SpecBuilder.runtimeconfig.json
+C:\github\SpecBuilder\bin\Debug\net10.0\SpecBuilder.dll
+C:\github\SpecBuilder\bin\Debug\net10.0\SpecBuilder.pdb
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.GeneratedMSBuildEditorConfig.editorconfig
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.AssemblyInfoInputs.cache
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.AssemblyInfo.cs
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.csproj.CoreCompileInputs.cache
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.dll
+C:\github\SpecBuilder\obj\Debug\net10.0\refint\SpecBuilder.dll
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.pdb
+C:\github\SpecBuilder\obj\Debug\net10.0\SpecBuilder.genruntimeconfig.cache
+C:\github\SpecBuilder\obj\Debug\net10.0\ref\SpecBuilder.dll
