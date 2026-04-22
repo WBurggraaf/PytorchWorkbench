@@ -992,12 +992,18 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     {
         Console.WriteLine("[step4] subsystem pages: building");
         var clusters = GetClusters(document).OrderByDescending(x => x.Files.Count).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
-        Console.WriteLine($"[step4] subsystem pages: clusters {clusters.Count}");
+        Console.WriteLine($"[step4] subsystem pages: total clusters {clusters.Count}");
+
+        // Filter: skip single-file "Generic Cluster" entries (noise, not meaningful clusters)
+        var filteredClusters = clusters
+            .Where(c => !(c.Name == "Generic Cluster" && c.Files.Count == 1))
+            .ToList();
+        Console.WriteLine($"[step4] subsystem pages: meaningful clusters {filteredClusters.Count} (filtered {clusters.Count - filteredClusters.Count} single-file generics)");
 
         // Deduplicate cluster names to avoid file collisions
         var nameMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var clusterOutputNames = new List<(ClusterRow Cluster, string OutputName)>();
-        foreach (var cluster in clusters)
+        foreach (var cluster in filteredClusters)
         {
             var safe = MakeSafeFileName(cluster.Name);
             if (nameMap.TryGetValue(safe, out var count))
