@@ -3199,12 +3199,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var referenceIndex = GetReferenceIndex(document);
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        Console.WriteLine($"[step4] L5: computing distances from {hubs.Count} hubs (parallel)");
+        Console.WriteLine($"[step4] L5: computing distances from {hubs.Count} hubs (parallel, incremental merge)");
 
-        var hubResults = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         var lockObj = new object();
         var progressLock = new object();
         var completedCount = 0;
+        var mergedCount = 0;
         var parallelism = Math.Max(1, (int)Math.Ceiling(Environment.ProcessorCount * 0.75));
         var lastProgressTime = sw.Elapsed;
 
@@ -3214,9 +3214,25 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         Parallel.ForEach(hubs, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, hub =>
         {
             var distances = DijkstraShortestPaths(hub, document, symbolIndex, referenceIndex, fileByPath, strongEdges);
+
             lock (lockObj)
             {
-                hubResults[hub] = distances;
+                // Merge immediately instead of accumulating in hubResults
+                foreach (var distKvp in distances)
+                {
+                    if (!allDistances.ContainsKey(distKvp.Key) || allDistances[distKvp.Key] > distKvp.Value)
+                    {
+                        allDistances[distKvp.Key] = distKvp.Value;
+                    }
+                }
+                mergedCount++;
+                distances.Clear();
+
+                // GC every 50 merged hubs to prevent accumulation
+                if (mergedCount % 50 == 0)
+                {
+                    GC.Collect(0);
+                }
             }
 
             lock (progressLock)
@@ -3241,20 +3257,8 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         });
 
         progressReporter.Complete();
-
-        foreach (var kvp in hubResults)
-        {
-            foreach (var distKvp in kvp.Value)
-            {
-                if (!allDistances.ContainsKey(distKvp.Key) || allDistances[distKvp.Key] > distKvp.Value)
-                {
-                    allDistances[distKvp.Key] = distKvp.Value;
-                }
-            }
-        }
-
         sw.Stop();
-        Console.WriteLine($"[step4] L5: dijkstra parallel completed in {sw.ElapsedMilliseconds}ms ({hubs.Count} hubs)");
+        Console.WriteLine($"[step4] L5: dijkstra completed in {sw.ElapsedMilliseconds}ms ({hubs.Count} hubs, {allDistances.Count} unique file distances)");
 
         return allDistances;
     }
@@ -3450,11 +3454,8 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var pq = new PriorityQueue<(string Node, int Distance), int>();
 
-        foreach (var file in document.Files)
-        {
-            distances[file.RelativePath] = int.MaxValue;
-        }
-
+        // OPTIMIZATION: Don't pre-initialize all file distances (can be 16K+ entries)
+        // Only add entries as we discover them, use int.MaxValue implicitly for undiscovered files
         distances[source] = 0;
         pq.Enqueue((source, 0), 0);
 
@@ -3510,7 +3511,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                 var targets = ResolveReferenceTargets(referenceIndex, symbolIndex, reference.Target ?? "");
                 foreach (var target in targets)
                 {
-                    if (!visited.Contains(target) && distances.ContainsKey(target))
+                    if (!visited.Contains(target))
                     {
                         var cost = reference.Kind switch
                         {
@@ -3521,10 +3522,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                             _ => 5,
                         };
 
+                        var currentTargetDist = distances.TryGetValue(target, out var d) ? d : int.MaxValue;
                         var newDist = currentDist + cost;
-                        if (newDist < distances[target])
+
+                        if (newDist < currentTargetDist)
                         {
-                            var wasUndiscovered = distances[target] == int.MaxValue;
+                            var wasUndiscovered = currentTargetDist == int.MaxValue;
                             distances[target] = newDist;
 
                             if (wasUndiscovered)
