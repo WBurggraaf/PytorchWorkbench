@@ -20,28 +20,43 @@ internal sealed class CacheManager
 
     /// <summary>
     /// Hash all source files in workspace (for Steps 1-2 cache key)
+    /// Uses fast hashing: file path + size + modification time (not content)
     /// </summary>
     public string ComputeSourceFilesHash(string workspaceRoot)
     {
+        Console.WriteLine("[cache] computing source files hash...");
         using var sha256 = System.Security.Cryptography.SHA256.Create();
         var sourceFiles = Directory.GetFiles(workspaceRoot, "*.*", SearchOption.AllDirectories)
             .Where(f => !f.Contains("\\bin\\") && !f.Contains("\\obj\\") && !f.Contains("\\.") && !f.Contains("\\generated\\"))
             .OrderBy(f => f)
             .ToList();
 
+        Console.WriteLine($"[cache] hashing {sourceFiles.Count} files...");
         var hashInput = new StringBuilder();
+        var reported = 0;
+
         foreach (var file in sourceFiles)
         {
             try
             {
-                var content = File.ReadAllBytes(file);
-                hashInput.Append(file).Append(':').Append(Convert.ToHexString(sha256.ComputeHash(content))).Append('|');
+                var info = new FileInfo(file);
+                var timestamp = info.LastWriteTimeUtc.Ticks.ToString("X16");
+                var size = info.Length.ToString("X");
+                hashInput.Append(file).Append(':').Append(size).Append(':').Append(timestamp).Append('|');
+
+                reported++;
+                if (reported % 1000 == 0)
+                {
+                    Console.WriteLine($"[cache] hashed {reported}/{sourceFiles.Count} files");
+                }
             }
             catch { }
         }
 
         var combined = sha256.ComputeHash(Encoding.UTF8.GetBytes(hashInput.ToString()));
-        return Convert.ToHexString(combined);
+        var result = Convert.ToHexString(combined);
+        Console.WriteLine($"[cache] source hash: {result.Substring(0, 12)}...");
+        return result;
     }
 
     /// <summary>
