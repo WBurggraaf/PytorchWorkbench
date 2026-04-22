@@ -12,6 +12,9 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     private readonly int _parallelism;
     private static readonly Dictionary<string, IReadOnlyList<ClusterRow>> ClusterCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions ClusterCacheJsonOptions = new() { WriteIndented = true };
+    private static readonly Dictionary<string, IReadOnlyDictionary<string, LightweightFileMetadata>> FileMetadataCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record LightweightFileMetadata(string RelativePath, string Language, List<string> Tags);
 
     public AstSpecLayersFlow(string workspaceRoot)
     {
@@ -47,11 +50,17 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         Console.WriteLine("[step4] reading canonical AST snapshot");
         var snapshot = await File.ReadAllTextAsync(snapshotPath, Encoding.UTF8);
+        Console.WriteLine($"[step4] snapshot size: {snapshot.Length / (1024 * 1024)}MB");
+
         var document = JsonSerializer.Deserialize<CanonicalAstDocument>(snapshot);
         if (document is null)
         {
             return new FlowResult($"Unable to read canonical AST snapshot: {snapshotPath}", snapshotPath);
         }
+
+        snapshot = null!;
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
 
         Console.WriteLine("[step4] building layered spec markdown");
         var report = BuildLayeredSpec(document);
@@ -62,14 +71,26 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         await File.WriteAllTextAsync(outputPath, report, Encoding.UTF8);
         Console.WriteLine("[step4] writing stable latest spec");
         await File.WriteAllTextAsync(Path.Combine(_specRoot, "ast-spec-latest.md"), report, Encoding.UTF8);
+
+        report = null!;
+        GC.Collect(0);
+
         Console.WriteLine("[step4] writing subsystem pages");
         await WriteSubsystemPagesAsync(document);
+        GC.Collect(0);
+
         Console.WriteLine("[step4] writing hierarchy pages");
         await WriteHierarchyPagesAsync(document);
+        GC.Collect(0);
+
         Console.WriteLine("[step4] writing C4 pages");
         await WriteC4PagesAsync(document);
+        GC.Collect(0);
+
         Console.WriteLine("[step4] writing fact diff");
         await WriteFactDiffAsync(document);
+        GC.Collect(0);
+
         Console.WriteLine("[step4] writing landing page");
         await WriteLandingPageAsync(document);
 
@@ -375,6 +396,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         {
             Console.WriteLine($"[step4] L5: loaded persisted cluster cache from {cachePath}");
             ClusterCache[key] = persisted;
+            ClearDocumentMajorCollections(document);
             return persisted;
         }
 
@@ -383,7 +405,50 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         ClusterCache[key] = clusters;
         SaveClusterCache(cachePath, clusters);
         Console.WriteLine($"[step4] L5: cached {clusters.Count} clusters");
+
+        // Clear document collections to free 200+ GB for subsequent write operations
+        ClearDocumentMajorCollections(document);
+
         return clusters;
+    }
+
+    private static void ClearDocumentMajorCollections(CanonicalAstDocument document)
+    {
+        if (document.Files != null)
+        {
+            ((List<CanonicalAstFile>)document.Files).Clear();
+        }
+        if (document.Symbols != null)
+        {
+            ((List<CanonicalAstSymbol>)document.Symbols).Clear();
+        }
+        if (document.Groups != null)
+        {
+            ((List<CanonicalAstGroup>)document.Groups).Clear();
+        }
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
+    }
+
+    private static IReadOnlyDictionary<string, LightweightFileMetadata> ExtractLightweightMetadata(CanonicalAstDocument document)
+    {
+        var key = document.SnapshotPath ?? string.Empty;
+        if (FileMetadataCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        var metadata = new Dictionary<string, LightweightFileMetadata>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in document.Files)
+        {
+            metadata[file.RelativePath] = new LightweightFileMetadata(
+                file.RelativePath,
+                file.Language,
+                new List<string>(file.Tags ?? [])
+            );
+        }
+        FileMetadataCache[key] = metadata;
+        return metadata;
     }
 
     private static ReferenceIndex GetReferenceIndex(CanonicalAstDocument document)
@@ -1488,9 +1553,11 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         InvalidateCacheIfNeeded(astHash, document.SnapshotPath);
 
-        // Cache file list and metadata once
+        // Extract and cache lightweight file metadata early, then clear document
+        Console.WriteLine("[step4] L5: extracting lightweight file metadata");
+        var lightweightMetadata = ExtractLightweightMetadata(document);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
-        Console.WriteLine($"[step4] L5: cached {fileByPath.Count} files for cluster building");
+        Console.WriteLine($"[step4] L5: cached {fileByPath.Count} files for cluster building (lightweight metadata extracted)");
 
         // Build symbol index only for Dijkstra/graph building
         var symbolIndex = BuildSymbolIndex(document.Symbols);
@@ -1533,7 +1600,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                 ((List<CanonicalAstReference>)file.References).Clear();
             }
         }
-        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
         GC.WaitForPendingFinalizers();
 
         // Symbol index and document symbols no longer needed after Dijkstra
@@ -1544,7 +1611,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         {
             ((List<CanonicalAstSymbol>)document.Symbols).Clear();
         }
-        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
         GC.WaitForPendingFinalizers();
 
         Dictionary<string, HashSet<string>> graph;
@@ -1637,7 +1704,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         graph = null!;
         bandCounts.Clear();
         bandCounts = null!;
-        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
 
         Console.WriteLine("[step4] L5: building cluster details (indexed + sorted from disk)");
         var clusterSw = System.Diagnostics.Stopwatch.StartNew();
@@ -3946,7 +4013,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         sortedComponents = null!;
         fileToComponentIndex.Clear();
         fileToComponentIndex = null!;
-        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
         GC.WaitForPendingFinalizers();
 
         return componentCount;
