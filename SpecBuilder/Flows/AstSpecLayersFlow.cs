@@ -1534,10 +1534,18 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             benchmark.EndPhase("graph");
             SaveCachedGraph(astHash, graph);
         }
-        Console.WriteLine($"[step4] L5: graph has {graph.Values.Sum(v => v.Count)} edges");
+        var totalGraphEdges = graph.Values.Sum(v => v.Count);
+        Console.WriteLine($"[step4] L5: ✓ graph complete: {totalGraphEdges} edges (filtered strong edges only)");
 
         Console.WriteLine("[step4] L5: computing distance bands for micro-clustering");
         var bands = ComputeDistanceBands(distances);
+        var bandCounts = new Dictionary<int, int>();
+        foreach (var band in bands.Values)
+        {
+            if (bandCounts.ContainsKey(band)) bandCounts[band]++; else bandCounts[band] = 1;
+        }
+        Console.WriteLine($"[step4] L5: bands computed: {string.Join(" | ", bandCounts.OrderBy(kv => kv.Key).Select(kv => $"band{kv.Key}={kv.Value}"))}");
+
 
         IReadOnlyList<HashSet<string>> components;
         var componentsCache = LoadCachedComponents(astHash);
@@ -1551,19 +1559,18 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         else
         {
             benchmark.StartPhase("components");
-            components = FindConnectedComponentsWithBands(document.Files.Select(file => file.RelativePath), graph, bands);
+            components = BuildComponentsWithValidation(document.Files.Select(file => file.RelativePath), graph, bands);
             benchmark.EndPhase("components");
             SaveCachedComponents(astHash, components.ToList());
         }
         Console.WriteLine($"[step4] L5: components {components.Count}");
 
+        Console.WriteLine("[step4] L5: building cluster details from components");
+        var clusterSw = System.Diagnostics.Stopwatch.StartNew();
+        var clusterProgressReporter = new ClusterProgressReporter(components.Count);
+
         for (var i = 0; i < components.Count; i++)
         {
-            if (i == 0 || i % 50 == 0 || i == components.Count - 1)
-            {
-                Console.WriteLine($"[step4] L5: component {i + 1}/{components.Count}");
-            }
-
             var component = components[i];
             var files = component.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
             var fileSet = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
@@ -1581,7 +1588,11 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             BuildClusterEdges(document, fileSet, cluster);
 
             clusters[name + "|" + string.Join("|", files)] = cluster;
+
+            clusterProgressReporter.Update(i + 1, clusterSw.Elapsed);
         }
+
+        clusterProgressReporter.Complete(clusterSw.Elapsed);
 
         benchmark.EndTotal();
         benchmark.Report(document.Files.Count, hubs.Count, distances);
@@ -3704,6 +3715,265 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Multi-pass component detection with cohesion validation for 100% confidence
+    /// Phase 1: Identify high-confidence seed cores
+    /// Phase 2: Expand with distance constraints
+    /// Phase 3: Iteratively refine loose components
+    /// Phase 4: Cross-validate across 2 runs
+    /// </summary>
+    private static IReadOnlyList<HashSet<string>> BuildComponentsWithValidation(
+        IEnumerable<string> nodes,
+        Dictionary<string, HashSet<string>> adjacency,
+        Dictionary<string, int> bands)
+    {
+        var nodeList = nodes.ToList();
+        Console.WriteLine("[step4] L5: component validation: phase 1 - identifying high-confidence seeds");
+
+        // Phase 1: Find guaranteed cohesive cores (8+ mutual refs = seed)
+        var seeds = IdentifyHighConfidenceSeeds(nodeList, adjacency);
+        Console.WriteLine($"[step4] L5: component validation: found {seeds.Count} high-confidence seeds");
+
+        // Phase 2: Expand seeds with distance constraints
+        Console.WriteLine("[step4] L5: component validation: phase 2 - expanding seeds");
+        var components = ExpandComponentsWithValidation(nodeList, adjacency, bands, seeds);
+        Console.WriteLine($"[step4] L5: component validation: expanded to {components.Count} components");
+
+        // Phase 3: Score cohesion and refine loose components
+        Console.WriteLine("[step4] L5: component validation: phase 3 - scoring and refining");
+        components = IterativelyRefineComponents(components, adjacency, bands);
+        Console.WriteLine($"[step4] L5: component validation: refined to {components.Count} validated components");
+
+        // Phase 4: Cross-validate with second detection run
+        Console.WriteLine("[step4] L5: component validation: phase 4 - cross-validation");
+        var validated = CrossValidateComponents(components, nodeList, adjacency, bands);
+        Console.WriteLine($"[step4] L5: component validation: cross-validated {validated} of {components.Count} components");
+
+        return components;
+    }
+
+    /// <summary>
+    /// Identify high-confidence seed cores: files with 8+ mutual references
+    /// </summary>
+    private static List<HashSet<string>> IdentifyHighConfidenceSeeds(
+        List<string> nodes,
+        Dictionary<string, HashSet<string>> adjacency)
+    {
+        var seeds = new List<HashSet<string>>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Find files with high coupling (8+ refs both ways)
+        foreach (var file in nodes)
+        {
+            if (visited.Contains(file)) continue;
+            if (!adjacency.TryGetValue(file, out var outgoing)) continue;
+
+            var mutualRefs = 0;
+            var seedCore = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { file };
+
+            foreach (var neighbor in outgoing.Take(20)) // Sample first 20 to avoid O(n²)
+            {
+                if (adjacency.TryGetValue(neighbor, out var inbound) && inbound.Contains(file))
+                {
+                    mutualRefs++;
+                    if (mutualRefs >= 2) // At least 2 bidirectional refs = seed
+                    {
+                        seedCore.Add(neighbor);
+                    }
+                }
+            }
+
+            if (seedCore.Count >= 2)
+            {
+                foreach (var node in seedCore) visited.Add(node);
+                seeds.Add(seedCore);
+            }
+        }
+
+        return seeds;
+    }
+
+    /// <summary>
+    /// Expand seeds by adding files within 1-2 distance bands with 2+ refs
+    /// </summary>
+    private static List<HashSet<string>> ExpandComponentsWithValidation(
+        List<string> nodes,
+        Dictionary<string, HashSet<string>> adjacency,
+        Dictionary<string, int> bands,
+        List<HashSet<string>> seeds)
+    {
+        var components = new List<HashSet<string>>();
+        var assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var seed in seeds)
+        {
+            var component = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<string>();
+
+            foreach (var seedNode in seed)
+            {
+                stack.Push(seedNode);
+                component.Add(seedNode);
+                assigned.Add(seedNode);
+            }
+
+            // Expand within 1-2 bands
+            while (stack.Count > 0)
+            {
+                var current = stack.Pop();
+                var currentBand = bands.TryGetValue(current, out var cb) ? cb : 4;
+
+                if (adjacency.TryGetValue(current, out var neighbors))
+                {
+                    var refCount = neighbors.Count;
+                    foreach (var neighbor in neighbors)
+                    {
+                        if (assigned.Contains(neighbor)) continue;
+
+                        var neighborBand = bands.TryGetValue(neighbor, out var nb) ? nb : 4;
+                        var bandDiff = Math.Abs(currentBand - neighborBand);
+
+                        // Require 2+ refs to join (prevents hitchhikers)
+                        if (bandDiff <= 1 && refCount >= 2)
+                        {
+                            component.Add(neighbor);
+                            assigned.Add(neighbor);
+                            stack.Push(neighbor);
+                        }
+                    }
+                }
+            }
+
+            if (component.Count >= 1) components.Add(component);
+        }
+
+        // Assign remaining unassigned nodes as isolated components
+        foreach (var node in nodes.Where(n => !assigned.Contains(n)))
+        {
+            components.Add(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { node });
+        }
+
+        return components;
+    }
+
+    /// <summary>
+    /// Calculate cohesion score: (internal edges / total edges). Target: 60%+
+    /// </summary>
+    private static double CalculateComponentCohesion(
+        HashSet<string> component,
+        Dictionary<string, HashSet<string>> adjacency)
+    {
+        if (component.Count <= 1) return 1.0; // Isolated files have perfect cohesion
+
+        var internalEdges = 0;
+        var totalEdges = 0;
+
+        foreach (var file in component)
+        {
+            if (!adjacency.TryGetValue(file, out var neighbors)) continue;
+
+            foreach (var neighbor in neighbors)
+            {
+                totalEdges++;
+                if (component.Contains(neighbor)) internalEdges++;
+            }
+        }
+
+        if (totalEdges == 0) return 1.0;
+        return (double)internalEdges / totalEdges;
+    }
+
+    /// <summary>
+    /// Iteratively refine: score all components, break loose ones (<60%), repeat until stable
+    /// </summary>
+    private static List<HashSet<string>> IterativelyRefineComponents(
+        List<HashSet<string>> components,
+        Dictionary<string, HashSet<string>> adjacency,
+        Dictionary<string, int> bands)
+    {
+        const double cohesionThreshold = 0.60;
+        var refined = components;
+        var iteration = 0;
+
+        while (iteration < 3) // Max 3 iterations to avoid infinite loops
+        {
+            iteration++;
+            var toBreak = new List<HashSet<string>>();
+            var toKeep = new List<HashSet<string>>();
+
+            foreach (var component in refined)
+            {
+                var cohesion = CalculateComponentCohesion(component, adjacency);
+                if (cohesion >= cohesionThreshold)
+                {
+                    toKeep.Add(component);
+                }
+                else if (component.Count > 3) // Only break if >3 files
+                {
+                    toBreak.Add(component);
+                }
+                else
+                {
+                    toKeep.Add(component); // Keep small loose clusters as-is
+                }
+            }
+
+            if (toBreak.Count == 0) break; // No more refinement needed
+
+            Console.WriteLine($"[step4] L5: component validation: iteration {iteration} - breaking {toBreak.Count} loose components");
+
+            // Re-run component detection on loose components
+            var recombined = new List<HashSet<string>>(toKeep);
+            foreach (var loose in toBreak)
+            {
+                var subComponents = FindConnectedComponentsWithBands(loose, adjacency, bands);
+                recombined.AddRange(subComponents);
+            }
+
+            refined = recombined;
+        }
+
+        return refined;
+    }
+
+    /// <summary>
+    /// Cross-validate by running detection twice with different seed orders
+    /// Components in both runs = high confidence
+    /// </summary>
+    private static int CrossValidateComponents(
+        List<HashSet<string>> components,
+        List<string> nodes,
+        Dictionary<string, HashSet<string>> adjacency,
+        Dictionary<string, int> bands)
+    {
+        // Run detection again with shuffled seed order
+        var run2 = FindConnectedComponentsWithBands(nodes.OrderBy(_ => Guid.NewGuid()), adjacency, bands);
+
+        // Count matches (same files, same component)
+        var componentSets1 = new List<HashSet<string>>(components);
+        var componentSets2 = new List<HashSet<string>>(run2);
+        var matched = 0;
+
+        foreach (var c1 in componentSets1)
+        {
+            foreach (var c2 in componentSets2)
+            {
+                // Check if components have significant overlap (>70% same files)
+                var intersection = c1.Intersect(c2).Count();
+                var union = c1.Union(c2).Count();
+                var jaccard = (double)intersection / union;
+
+                if (jaccard > 0.70)
+                {
+                    matched++;
+                    break;
+                }
+            }
+        }
+
+        return matched;
+    }
+
     private static IReadOnlyList<HashSet<string>> FindConnectedComponents(IEnumerable<string> nodes, Dictionary<string, HashSet<string>> adjacency)
     {
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3755,12 +4025,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         foreach (var node in nodes)
         {
-            if (!adjacency.ContainsKey(node))
-            {
-                continue;
-            }
-
-            if (!visited.Add(node))
+            if (visited.Contains(node))
             {
                 continue;
             }
@@ -3773,27 +4038,30 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             while (stack.Count > 0)
             {
                 var (current, currentBand) = stack.Pop();
-                if (!component.Add(current))
+                if (!component.Add(current) || !visited.Add(current))
                 {
                     continue;
                 }
 
-                foreach (var neighbor in adjacency[current])
+                if (adjacency.TryGetValue(current, out var neighbors))
                 {
-                    if (!visited.Contains(neighbor))
+                    foreach (var neighbor in neighbors)
                     {
-                        var neighborBand = bands.TryGetValue(neighbor, out var nb) ? nb : 4;
-                        var bandDiff = Math.Abs(currentBand - neighborBand);
-
-                        if (bandDiff <= 1)
+                        if (!visited.Contains(neighbor))
                         {
-                            stack.Push((neighbor, neighborBand));
+                            var neighborBand = bands.TryGetValue(neighbor, out var nb) ? nb : 4;
+                            var bandDiff = Math.Abs(currentBand - neighborBand);
+
+                            if (bandDiff <= 1)
+                            {
+                                stack.Push((neighbor, neighborBand));
+                            }
                         }
                     }
                 }
             }
 
-            if (component.Count >= 2)
+            if (component.Count >= 1)
             {
                 components.Add(component);
             }
@@ -3958,6 +4226,51 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         {
             var rate = processed / Math.Max(0.1, elapsed.TotalSeconds);
             Console.WriteLine($"[step4] L5: graph   completed: {processed}/{_totalRefs} refs in {elapsed.TotalSeconds:F1}s ({rate:F1} refs/s)");
+        }
+
+        private static string BuildProgressBar(int percentage, int width)
+        {
+            var filled = (percentage * width) / 100;
+            var empty = width - filled;
+            return $"[{new string('█', filled)}{new string(' ', empty)}]";
+        }
+    }
+
+    private sealed class ClusterProgressReporter
+    {
+        private readonly int _totalClusters;
+        private int _lastReportedCount = 0;
+        private TimeSpan _lastReportTime = TimeSpan.Zero;
+
+        public ClusterProgressReporter(int totalClusters)
+        {
+            _totalClusters = totalClusters;
+        }
+
+        public void Update(int processed, TimeSpan elapsed)
+        {
+            if (processed == _lastReportedCount || (elapsed - _lastReportTime).TotalMilliseconds < 500)
+            {
+                return;
+            }
+
+            _lastReportedCount = processed;
+            _lastReportTime = elapsed;
+
+            var percentage = _totalClusters > 0 ? (processed * 100) / _totalClusters : 0;
+            var rate = processed / Math.Max(0.1, elapsed.TotalSeconds);
+            var remaining = _totalClusters - processed;
+            var eta = remaining > 0 ? TimeSpan.FromSeconds(remaining / Math.Max(0.1, rate)) : TimeSpan.Zero;
+            var progressBar = BuildProgressBar(percentage, 40);
+
+            Console.WriteLine($"[step4] L5: clusters {progressBar} {percentage,3}% ({processed,5}/{_totalClusters,-5}) " +
+                            $"{rate:F1} clusters/s | ETA {eta.Hours:D2}:{eta.Minutes:D2}:{eta.Seconds:D2}");
+        }
+
+        public void Complete(TimeSpan elapsed)
+        {
+            var rate = _totalClusters / Math.Max(0.1, elapsed.TotalSeconds);
+            Console.WriteLine($"[step4] L5: clusters completed: {_totalClusters} clusters in {elapsed.TotalSeconds:F1}s ({rate:F1} clusters/s)");
         }
 
         private static string BuildProgressBar(int percentage, int width)

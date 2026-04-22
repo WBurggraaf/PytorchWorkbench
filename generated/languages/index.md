@@ -1,7 +1,7 @@
 ﻿# Language / Tech Stack Index
 
 - Source index: `generated/originfileindex.md`
-- Generated: `2026-04-22T05:54:44.6842670+02:00`
+- Generated: `2026-04-22T08:47:25.1107961+02:00`
 
 ## Categories
 
