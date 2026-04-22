@@ -57,6 +57,22 @@ internal sealed class OllamaLanguagesFlow : IPipelineFlow
                 _indexOutputPath);
         }
 
+        var generatedRoot = Path.GetDirectoryName(_indexPath) ?? _indexPath;
+        var step1HashFile = Path.Combine(generatedRoot, ".step1-hash");
+        var step2HashFile = Path.Combine(generatedRoot, ".step2-hash");
+
+        if (File.Exists(step2HashFile) && File.Exists(step1HashFile) && File.Exists(_indexOutputPath))
+        {
+            var step1Hash = File.ReadAllText(step1HashFile).Trim();
+            var step2Hash = File.ReadAllText(step2HashFile).Trim();
+            if (step1Hash == step2Hash)
+            {
+                Console.WriteLine("[step2] ✓ source files unchanged - using cached tech stack classification");
+                return new FlowResult("Loaded cached tech stack classification", _indexOutputPath);
+            }
+        }
+
+        Console.WriteLine("[step2] source files changed or cache missing - running Ollama classification");
         var indexMarkdown = await File.ReadAllTextAsync(_indexPath, Encoding.UTF8);
         var ignorePatterns = LoadIgnorePatterns();
         var groups = ParseIndex(indexMarkdown)
@@ -71,6 +87,9 @@ internal sealed class OllamaLanguagesFlow : IPipelineFlow
             var categories = await ClassifyPerGroupAsync(groups);
             await WriteCategoryFilesAsync(categories);
             await File.WriteAllTextAsync(_indexOutputPath, BuildIndexMarkdown(categories.Values), Encoding.UTF8);
+
+            File.WriteAllText(step2HashFile, File.ReadAllText(step1HashFile));
+            Console.WriteLine("[step2] saved cache marker");
 
             return new FlowResult(
                 $"Wrote {categories.Count} tech/language category files from {groups.Count} extension groups.",

@@ -49,6 +49,21 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
                 _indexPath));
         }
 
+        var cacheManager = new CacheManager(_workspaceRoot);
+        var sourceHash = cacheManager.ComputeSourceFilesHash(_workspaceRoot);
+        var hashMarkerPath = Path.Combine(_generatedRoot, ".step1-hash");
+
+        if (File.Exists(hashMarkerPath))
+        {
+            var cachedHash = File.ReadAllText(hashMarkerPath).Trim();
+            if (cachedHash == sourceHash && File.Exists(_indexPath))
+            {
+                Console.WriteLine("[step1] ✓ source files unchanged - using cached inventory");
+                return Task.FromResult(new FlowResult("Loaded cached inventory", _indexPath));
+            }
+        }
+
+        Console.WriteLine("[step1] source files changed or cache missing - rebuilding inventory");
         var ignorePatterns = LoadIgnorePatterns(out var ignoreSource);
         var files = Directory
             .EnumerateFiles(_originRoot, "*", SearchOption.AllDirectories)
@@ -86,6 +101,9 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
 
         var manifest = WriteExtensionFiles(grouped);
         File.WriteAllText(_indexPath, BuildIndexMarkdown(files, manifest), Encoding.UTF8);
+
+        File.WriteAllText(hashMarkerPath, sourceHash);
+        Console.WriteLine($"[step1] saved cache marker");
 
         return Task.FromResult(new FlowResult(
             $"Wrote inventory for {files.Count} files across {grouped.Count} extension groups.",

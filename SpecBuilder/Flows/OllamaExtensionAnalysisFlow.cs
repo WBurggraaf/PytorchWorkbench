@@ -42,6 +42,26 @@ internal sealed class OllamaExtensionAnalysisFlow : IPipelineFlow
                 return new FlowResult($"Missing origin file index: {_indexPath}. Run step 1 first.", _indexPath);
             }
 
+            var generatedRoot = Path.GetDirectoryName(_indexPath) ?? _indexPath;
+            var step2HashFile = Path.Combine(generatedRoot, ".step2-hash");
+            var step3HashFile = Path.Combine(generatedRoot, ".step3-hash");
+            var latestSnapshot = Directory.GetFiles(_outputRoot, "ast-database-*.json", SearchOption.TopDirectoryOnly)
+                .OrderByDescending(f => f)
+                .FirstOrDefault();
+
+            if (File.Exists(step3HashFile) && File.Exists(step2HashFile) && latestSnapshot is not null)
+            {
+                var step2Hash = File.ReadAllText(step2HashFile).Trim();
+                var step3Hash = File.ReadAllText(step3HashFile).Trim();
+                if (step2Hash == step3Hash)
+                {
+                    Console.WriteLine("[step3] ✓ source files unchanged - using cached AST database");
+                    var cachedSummaryPath = Path.Combine(_outputRoot, "index.md");
+                    return new FlowResult("Loaded cached AST database", cachedSummaryPath);
+                }
+            }
+
+            Console.WriteLine("[step3] source files changed or cache missing - rebuilding AST database");
             Console.WriteLine("[step3] reading origin file index");
             var indexMarkdown = await File.ReadAllTextAsync(_indexPath, Encoding.UTF8);
             Console.WriteLine("[step3] parsing groups");
@@ -90,6 +110,9 @@ internal sealed class OllamaExtensionAnalysisFlow : IPipelineFlow
             Console.WriteLine("[step3] writing summary and query guide");
             await File.WriteAllTextAsync(summaryPath, BuildSummaryMarkdown(database, snapshotPath), Encoding.UTF8);
             await File.WriteAllTextAsync(Path.Combine(_outputRoot, "queries.md"), BuildQueryGuideMarkdown(database), Encoding.UTF8);
+
+            File.WriteAllText(step3HashFile, File.ReadAllText(step2HashFile));
+            Console.WriteLine("[step3] saved cache marker");
 
             Console.WriteLine("[step3] complete");
             return new FlowResult(
