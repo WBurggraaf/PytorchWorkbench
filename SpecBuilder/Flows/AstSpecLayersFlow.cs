@@ -2906,6 +2906,10 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         Console.WriteLine($"[step4] L5: computing distances from {hubs.Count} hubs (parallel)");
+        Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
+        var strongEdges = BuildStrongEdgeGraph(document);
+        var strongEdgesBuildTime = sw.ElapsedMilliseconds;
+        Console.WriteLine($"[step4] L5: strong edge graph built in {strongEdgesBuildTime}ms");
 
         var hubResults = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         var lockObj = new object();
@@ -2919,7 +2923,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         Parallel.ForEach(hubs, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, hub =>
         {
-            var distances = DijkstraShortestPaths(hub, document, symbolIndex, referenceIndex, fileByPath);
+            var distances = DijkstraShortestPaths(hub, document, symbolIndex, referenceIndex, fileByPath, strongEdges);
             lock (lockObj)
             {
                 hubResults[hub] = distances;
@@ -2965,7 +2969,26 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return allDistances;
     }
 
-    private static Dictionary<string, int> DijkstraShortestPaths(string source, CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, ReferenceIndex referenceIndex, Dictionary<string, CanonicalAstFile> fileByPath, double targetReachability = 0.95)
+    private static Dictionary<string, IReadOnlyList<CanonicalAstReference>> BuildStrongEdgeGraph(CanonicalAstDocument document)
+    {
+        var strongEdges = new Dictionary<string, IReadOnlyList<CanonicalAstReference>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var file in document.Files)
+        {
+            var strong = file.References
+                .Where(r => r.Kind is "defines" or "call")
+                .ToList();
+
+            if (strong.Count > 0)
+            {
+                strongEdges[file.RelativePath] = strong;
+            }
+        }
+
+        return strongEdges;
+    }
+
+    private static Dictionary<string, int> DijkstraShortestPaths(string source, CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, ReferenceIndex referenceIndex, Dictionary<string, CanonicalAstFile> fileByPath, Dictionary<string, IReadOnlyList<CanonicalAstReference>> strongEdges, double targetReachability = 0.95)
     {
         var distances = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -3010,13 +3033,10 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             }
 
             var candidates = new List<(string Target, int Cost)>();
-            foreach (var reference in currentFile.References)
-            {
-                if (reference.Kind is not ("include" or "using" or "import" or "call" or "type" or "defines"))
-                {
-                    continue;
-                }
+            var edgesToExamine = strongEdges.TryGetValue(current, out var edges) ? edges : Array.Empty<CanonicalAstReference>();
 
+            foreach (var reference in edgesToExamine)
+            {
                 edgesExamined++;
                 if (edgesExamined >= maxEdges)
                 {
