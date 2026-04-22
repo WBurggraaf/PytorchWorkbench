@@ -1595,13 +1595,29 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         Console.WriteLine($"[step4] L5: cached {fileByPath.Count} files for cluster building (lightweight metadata extracted)");
 
-        // Build symbol index only for Dijkstra/graph building
+        // Build symbol index only for Dijkstra/graph building (limit to needed symbols only)
+        Console.WriteLine("[step4] L5: building minimal symbol index");
         var symbolIndex = BuildSymbolIndex(document.Symbols);
+        var symbolCount = symbolIndex.Count;
+        if (symbolCount > 100000)
+        {
+            Console.WriteLine($"[step4] L5: warning: symbol index large ({symbolCount} symbols), may impact memory");
+        }
 
         Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
         var strongEdges = BuildStrongEdgeGraph(document);
         var strongEdgesCount = strongEdges.Values.Sum(edges => edges.Count);
-        Console.WriteLine($"[step4] L5: strong edges: {strongEdgesCount} (reduced from ~160K+)");
+        var strongEdgesNodesCount = strongEdges.Count;
+        Console.WriteLine($"[step4] L5: strong edges: {strongEdgesCount} refs across {strongEdgesNodesCount} files (reduced from ~160K+)");
+
+        // Trim strongEdges to only keep files with edges (remove empty entries)
+        var emptyEdgeFiles = strongEdges.Where(kvp => kvp.Value.Count == 0).Select(kvp => kvp.Key).ToList();
+        foreach (var emptyFile in emptyEdgeFiles)
+        {
+            strongEdges.Remove(emptyFile);
+        }
+        Console.WriteLine($"[step4] L5: trimmed edge graph ({strongEdges.Count} files with edges)");
+        GC.Collect(0);
 
         Console.WriteLine("[step4] L5: identifying hub nodes");
         benchmark.StartPhase("hubs");
