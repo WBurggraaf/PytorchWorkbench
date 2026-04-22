@@ -993,11 +993,32 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         Console.WriteLine("[step4] subsystem pages: building");
         var clusters = GetClusters(document).OrderByDescending(x => x.Files.Count).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
         Console.WriteLine($"[step4] subsystem pages: clusters {clusters.Count}");
-        await ProcessInBatchesAsync(
-            clusters,
-            _parallelism,
-            cluster =>
+
+        // Deduplicate cluster names to avoid file collisions
+        var nameMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var clusterOutputNames = new List<(ClusterRow Cluster, string OutputName)>();
+        foreach (var cluster in clusters)
+        {
+            var safe = MakeSafeFileName(cluster.Name);
+            if (nameMap.TryGetValue(safe, out var count))
             {
+                nameMap[safe] = count + 1;
+                safe = $"{safe}_{count}";
+            }
+            else
+            {
+                nameMap[safe] = 1;
+            }
+            clusterOutputNames.Add((cluster, safe));
+        }
+
+        await ProcessInBatchesAsync(
+            clusterOutputNames,
+            _parallelism,
+            item =>
+            {
+                var cluster = item.Cluster;
+                var safe = item.OutputName;
                 Console.WriteLine($"[step4] subsystem pages: {cluster.Name} ({cluster.Files.Count} files, {cluster.Edges.Count} edges)");
                 var output = new StringBuilder();
                 output.AppendLine($"# Cluster: {cluster.Name}");
@@ -1024,7 +1045,6 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                     }
                 }
 
-                var safe = MakeSafeFileName(cluster.Name);
                 var path = Path.Combine(_specRoot, $"{safe}.md");
                 return File.WriteAllTextAsync(path, output.ToString(), Encoding.UTF8);
             });
