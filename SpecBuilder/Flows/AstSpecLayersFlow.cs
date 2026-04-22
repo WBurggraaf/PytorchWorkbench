@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 
 namespace SpecBuilder.Flows;
 
@@ -1482,6 +1483,9 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var symbolIndex = BuildSymbolIndex(document.Symbols);
 
+        var astHash = ComputeAstHash(document);
+        Console.WriteLine($"[step4] L5: AST hash {astHash.Substring(0, 12)}... (cache key)");
+
         Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
         var strongEdges = BuildStrongEdgeGraph(document);
         var strongEdgesCount = strongEdges.Values.Sum(edges => edges.Count);
@@ -1493,23 +1497,62 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         benchmark.EndPhase("hubs");
         Console.WriteLine($"[step4] L5: found {hubs.Count} hub nodes");
 
-        Console.WriteLine("[step4] L5: computing shortest distances from hubs");
-        benchmark.StartPhase("dijkstra");
-        var distances = ComputeDistancesFromHubs(document, symbolIndex, hubs, strongEdges);
-        benchmark.EndPhase("dijkstra");
+        Dictionary<string, int> distances;
+        var distancesCache = LoadCachedDistances(astHash);
+        if (distancesCache is not null)
+        {
+            Console.WriteLine("[step4] L5: ✓ loaded cached Dijkstra distances");
+            benchmark.StartPhase("dijkstra");
+            distances = distancesCache;
+            benchmark.EndPhase("dijkstra");
+        }
+        else
+        {
+            Console.WriteLine("[step4] L5: computing shortest distances from hubs");
+            benchmark.StartPhase("dijkstra");
+            distances = ComputeDistancesFromHubs(document, symbolIndex, hubs, strongEdges);
+            benchmark.EndPhase("dijkstra");
+            SaveCachedDistances(astHash, distances);
+        }
 
-        Console.WriteLine("[step4] L5: building distance-optimized graph");
-        benchmark.StartPhase("graph");
-        var graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances, strongEdges);
-        benchmark.EndPhase("graph");
+        Dictionary<string, HashSet<string>> graph;
+        var graphCache = LoadCachedGraph(astHash);
+        if (graphCache is not null)
+        {
+            Console.WriteLine("[step4] L5: ✓ loaded cached graph edges");
+            benchmark.StartPhase("graph");
+            graph = graphCache;
+            benchmark.EndPhase("graph");
+        }
+        else
+        {
+            Console.WriteLine("[step4] L5: building distance-optimized graph");
+            benchmark.StartPhase("graph");
+            graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances, strongEdges);
+            benchmark.EndPhase("graph");
+            SaveCachedGraph(astHash, graph);
+        }
         Console.WriteLine($"[step4] L5: graph has {graph.Values.Sum(v => v.Count)} edges");
 
         Console.WriteLine("[step4] L5: computing distance bands for micro-clustering");
         var bands = ComputeDistanceBands(distances);
 
-        benchmark.StartPhase("components");
-        var components = FindConnectedComponentsWithBands(document.Files.Select(file => file.RelativePath), graph, bands);
-        benchmark.EndPhase("components");
+        IReadOnlyList<HashSet<string>> components;
+        var componentsCache = LoadCachedComponents(astHash);
+        if (componentsCache is not null)
+        {
+            Console.WriteLine("[step4] L5: ✓ loaded cached components");
+            benchmark.StartPhase("components");
+            components = componentsCache;
+            benchmark.EndPhase("components");
+        }
+        else
+        {
+            benchmark.StartPhase("components");
+            components = FindConnectedComponentsWithBands(document.Files.Select(file => file.RelativePath), graph, bands);
+            benchmark.EndPhase("components");
+            SaveCachedComponents(astHash, components.ToList());
+        }
         Console.WriteLine($"[step4] L5: components {components.Count}");
 
         for (var i = 0; i < components.Count; i++)
@@ -2968,6 +3011,99 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         Console.WriteLine($"[step4] L5: dijkstra parallel completed in {sw.ElapsedMilliseconds}ms ({hubs.Count} hubs)");
 
         return allDistances;
+    }
+
+    private static string ComputeAstHash(CanonicalAstDocument document)
+    {
+        using var sha256 = System.Security.Cryptography.SHA256.Create();
+        var json = JsonSerializer.Serialize(document);
+        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(json));
+        return Convert.ToHexString(hash);
+    }
+
+    private static string GetCachePath(string astHash, string phase)
+    {
+        var baseDir = AppContext.BaseDirectory;
+        var cacheDir = Path.Combine(baseDir, "..", "..", "generated", "step4-cache", astHash);
+        var fullPath = Path.GetFullPath(cacheDir);
+        Directory.CreateDirectory(fullPath);
+        return Path.Combine(fullPath, $"{phase}.json");
+    }
+
+    private static Dictionary<string, int>? LoadCachedDistances(string astHash)
+    {
+        var path = GetCachePath(astHash, "distances");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            return JsonSerializer.Deserialize<Dictionary<string, int>>(json);
+        }
+        catch { return null; }
+    }
+
+    private static void SaveCachedDistances(string astHash, Dictionary<string, int> distances)
+    {
+        try
+        {
+            var path = GetCachePath(astHash, "distances");
+            var json = JsonSerializer.Serialize(distances, new JsonSerializerOptions { WriteIndented = false });
+            File.WriteAllText(path, json);
+        }
+        catch { }
+    }
+
+    private static Dictionary<string, HashSet<string>>? LoadCachedGraph(string astHash)
+    {
+        var path = GetCachePath(astHash, "graph");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            var dict = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(json);
+            return dict?.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new HashSet<string>(kvp.Value, StringComparer.OrdinalIgnoreCase),
+                StringComparer.OrdinalIgnoreCase);
+        }
+        catch { return null; }
+    }
+
+    private static void SaveCachedGraph(string astHash, Dictionary<string, HashSet<string>> graph)
+    {
+        try
+        {
+            var path = GetCachePath(astHash, "graph");
+            var dict = graph.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.ToList());
+            var json = JsonSerializer.Serialize(dict, new JsonSerializerOptions { WriteIndented = false });
+            File.WriteAllText(path, json);
+        }
+        catch { }
+    }
+
+    private static List<HashSet<string>>? LoadCachedComponents(string astHash)
+    {
+        var path = GetCachePath(astHash, "components");
+        if (!File.Exists(path)) return null;
+        try
+        {
+            var json = File.ReadAllText(path);
+            var list = JsonSerializer.Deserialize<List<List<string>>>(json);
+            return list?.Select(component => new HashSet<string>(component, StringComparer.OrdinalIgnoreCase)).ToList();
+        }
+        catch { return null; }
+    }
+
+    private static void SaveCachedComponents(string astHash, List<HashSet<string>> components)
+    {
+        try
+        {
+            var path = GetCachePath(astHash, "components");
+            var list = components.Select(c => c.ToList()).ToList();
+            var json = JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = false });
+            File.WriteAllText(path, json);
+        }
+        catch { }
     }
 
     private static Dictionary<string, IReadOnlyList<CanonicalAstReference>> BuildStrongEdgeGraph(CanonicalAstDocument document)
