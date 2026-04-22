@@ -1486,6 +1486,8 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var astHash = ComputeAstHash(document);
         Console.WriteLine($"[step4] L5: AST hash {astHash.Substring(0, 12)}... (cache key)");
 
+        InvalidateCacheIfNeeded(astHash, document.SnapshotPath);
+
         Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
         var strongEdges = BuildStrongEdgeGraph(document);
         var strongEdgesCount = strongEdges.Values.Sum(edges => edges.Count);
@@ -3021,6 +3023,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return Convert.ToHexString(hash);
     }
 
+    private static string GetSpecBuilderVersion()
+    {
+        var version = typeof(AstSpecLayersFlow).Assembly.GetName().Version;
+        return $"{version?.Major}.{version?.Minor}.{version?.Build}";
+    }
+
     private static string GetCachePath(string astHash, string phase)
     {
         var baseDir = AppContext.BaseDirectory;
@@ -3028,6 +3036,73 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var fullPath = Path.GetFullPath(cacheDir);
         Directory.CreateDirectory(fullPath);
         return Path.Combine(fullPath, $"{phase}.json");
+    }
+
+    private static void InvalidateCacheIfNeeded(string astHash, string astSnapshotPath)
+    {
+        var baseDir = AppContext.BaseDirectory;
+        var cacheDirPath = Path.Combine(baseDir, "..", "..", "generated", "step4-cache", astHash);
+        var fullCachePath = Path.GetFullPath(cacheDirPath);
+
+        if (!Directory.Exists(fullCachePath))
+        {
+            return;
+        }
+
+        bool shouldInvalidate = false;
+        var versionFile = Path.Combine(fullCachePath, ".version");
+
+        if (File.Exists(versionFile))
+        {
+            try
+            {
+                var cachedVersion = File.ReadAllText(versionFile).Trim();
+                var currentVersion = GetSpecBuilderVersion();
+                if (cachedVersion != currentVersion)
+                {
+                    Console.WriteLine($"[step4] L5: SpecBuilder version mismatch (cached: {cachedVersion}, current: {currentVersion}) - invalidating cache");
+                    shouldInvalidate = true;
+                }
+            }
+            catch { }
+        }
+        else
+        {
+            shouldInvalidate = true;
+        }
+
+        if (!shouldInvalidate && !string.IsNullOrEmpty(astSnapshotPath) && File.Exists(astSnapshotPath))
+        {
+            try
+            {
+                var astTime = File.GetLastWriteTimeUtc(astSnapshotPath);
+                var cacheTime = Directory.GetCreationTimeUtc(fullCachePath);
+                if (astTime > cacheTime)
+                {
+                    Console.WriteLine($"[step4] L5: AST file newer than cache - invalidating cache");
+                    shouldInvalidate = true;
+                }
+            }
+            catch { }
+        }
+
+        if (shouldInvalidate)
+        {
+            try
+            {
+                Directory.Delete(fullCachePath, recursive: true);
+                Console.WriteLine($"[step4] L5: cache invalidated (version/upstream change)");
+            }
+            catch { }
+        }
+        else
+        {
+            try
+            {
+                File.WriteAllText(versionFile, GetSpecBuilderVersion());
+            }
+            catch { }
+        }
     }
 
     private static Dictionary<string, int>? LoadCachedDistances(string astHash)
