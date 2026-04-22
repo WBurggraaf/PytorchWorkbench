@@ -8,8 +8,9 @@ Do not collapse the answer into a short summary unless the file is genuinely tin
 
 EXPERT LENS:
 - Pay close attention to performance, waiting, overhead, wasted work, and avoidable inefficiency.
-- Notice bad programming practices, repeated work, serialized flows, unnecessary allocations, and CPU underuse.
-- Add those observations as extra remarks, not as the main point.
+- Notice bad programming practices, repeated work, serialized flows, unnecessary allocations, CPU underuse, uOps-level inefficiency, latency, lag, waiting, bottlenecks, and security-sensitive issues.
+- Add only issue-focused remarks there, not general commentary.
+- Keep them strictly about flaws, inefficiencies, code smells, clear bugs, review findings, performance risks, or security concerns.
 - Keep the main explanation first; performance notes are secondary extras.
 
 STYLE:

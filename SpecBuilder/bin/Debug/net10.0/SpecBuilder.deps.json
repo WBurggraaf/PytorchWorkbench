@@ -7,8 +7,152 @@
   "targets": {
     ".NETCoreApp,Version=v10.0": {
       "SpecBuilder/1.0.0": {
+        "dependencies": {
+          "CppAst": "0.24.0",
+          "Microsoft.CodeAnalysis.CSharp": "5.3.0"
+        },
         "runtime": {
           "SpecBuilder.dll": {}
+        }
+      },
+      "ClangSharp/20.1.2.4": {
+        "dependencies": {
+          "ClangSharp.Interop": "20.1.2.4"
+        },
+        "runtime": {
+          "lib/net10.0/ClangSharp.dll": {
+            "assemblyVersion": "20.1.2.4",
+            "fileVersion": "20.1.2.4"
+          }
+        }
+      },
+      "ClangSharp.Interop/20.1.2.4": {
+        "runtime": {
+          "lib/net10.0/ClangSharp.Interop.dll": {
+            "assemblyVersion": "20.1.2.4",
+            "fileVersion": "20.1.2.4"
+          }
+        }
+      },
+      "CppAst/0.24.0": {
+        "dependencies": {
+          "ClangSharp": "20.1.2.4",
+          "Irony": "1.5.3"
+        },
+        "runtime": {
+          "lib/net8.0/CppAst.dll": {
+            "assemblyVersion": "0.0.0.0",
+            "fileVersion": "0.24.0.0"
+          }
+        }
+      },
+      "Irony/1.5.3": {
+        "runtime": {
+          "lib/netstandard2.0/Irony.dll": {
+            "assemblyVersion": "1.5.3.0",
+            "fileVersion": "1.5.3.0"
+          }
+        }
+      },
+      "Microsoft.CodeAnalysis.Common/5.3.0": {
+        "runtime": {
+          "lib/net10.0/Microsoft.CodeAnalysis.dll": {
+            "assemblyVersion": "5.3.0.0",
+            "fileVersion": "5.300.26.7805"
+          }
+        },
+        "resources": {
+          "lib/net10.0/cs/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "cs"
+          },
+          "lib/net10.0/de/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "de"
+          },
+          "lib/net10.0/es/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "es"
+          },
+          "lib/net10.0/fr/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "fr"
+          },
+          "lib/net10.0/it/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "it"
+          },
+          "lib/net10.0/ja/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "ja"
+          },
+          "lib/net10.0/ko/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "ko"
+          },
+          "lib/net10.0/pl/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "pl"
+          },
+          "lib/net10.0/pt-BR/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "pt-BR"
+          },
+          "lib/net10.0/ru/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "ru"
+          },
+          "lib/net10.0/tr/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "tr"
+          },
+          "lib/net10.0/zh-Hans/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "zh-Hans"
+          },
+          "lib/net10.0/zh-Hant/Microsoft.CodeAnalysis.resources.dll": {
+            "locale": "zh-Hant"
+          }
+        }
+      },
+      "Microsoft.CodeAnalysis.CSharp/5.3.0": {
+        "dependencies": {
+          "Microsoft.CodeAnalysis.Common": "5.3.0"
+        },
+        "runtime": {
+          "lib/net10.0/Microsoft.CodeAnalysis.CSharp.dll": {
+            "assemblyVersion": "5.3.0.0",
+            "fileVersion": "5.300.26.7805"
+          }
+        },
+        "resources": {
+          "lib/net10.0/cs/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "cs"
+          },
+          "lib/net10.0/de/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "de"
+          },
+          "lib/net10.0/es/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "es"
+          },
+          "lib/net10.0/fr/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "fr"
+          },
+          "lib/net10.0/it/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "it"
+          },
+          "lib/net10.0/ja/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "ja"
+          },
+          "lib/net10.0/ko/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "ko"
+          },
+          "lib/net10.0/pl/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "pl"
+          },
+          "lib/net10.0/pt-BR/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "pt-BR"
+          },
+          "lib/net10.0/ru/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "ru"
+          },
+          "lib/net10.0/tr/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "tr"
+          },
+          "lib/net10.0/zh-Hans/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "zh-Hans"
+          },
+          "lib/net10.0/zh-Hant/Microsoft.CodeAnalysis.CSharp.resources.dll": {
+            "locale": "zh-Hant"
+          }
         }
       }
     }
@@ -18,6 +162,48 @@
       "type": "project",
       "serviceable": false,
       "sha512": ""
+    },
+    "ClangSharp/20.1.2.4": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-XtObZyqqU26yazgoUCxQLw8AFjiZLY/mc10FtEHIY/Go+pvgSFGx+Ai5IlpxolIvxlQ+WWcPA2wLvULL+L7mVA==",
+      "path": "clangsharp/20.1.2.4",
+      "hashPath": "clangsharp.20.1.2.4.nupkg.sha512"
+    },
+    "ClangSharp.Interop/20.1.2.4": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-OxvJ9rxNM8Uq3WNLfUh/rq+8LBnK5GVrPJsQ9kR41upX3kWhIiKgoZC3XFQzhu2HTUp86jOu9RlnAaO82s9bWg==",
+      "path": "clangsharp.interop/20.1.2.4",
+      "hashPath": "clangsharp.interop.20.1.2.4.nupkg.sha512"
+    },
+    "CppAst/0.24.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-bKMZlo2LaLFsLOfDSBbVsu+1fI09jqmp5zIHRo0HClc+wb+Sxu0zXb5zidQhmUAlp0/ajlCsKmhLp/JRW7nRdQ==",
+      "path": "cppast/0.24.0",
+      "hashPath": "cppast.0.24.0.nupkg.sha512"
+    },
+    "Irony/1.5.3": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-wy0LlNq9Bhqy2C9O5burGCJPB9CyWuWf/JHwcnaxnM5wapPEc7uW6MBBzkymrV/pS2UwETK/0nJXzhh5Y6wv4Q==",
+      "path": "irony/1.5.3",
+      "hashPath": "irony.1.5.3.nupkg.sha512"
+    },
+    "Microsoft.CodeAnalysis.Common/5.3.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-uC0qk3jzTQY7i90ehfnCqaOZpBUGJyPMiHJ3c0jOb8yaPBjWzIhVdNxPbeVzI74DB0C+YgBKPLqUkgFZzua5Mg==",
+      "path": "microsoft.codeanalysis.common/5.3.0",
+      "hashPath": "microsoft.codeanalysis.common.5.3.0.nupkg.sha512"
+    },
+    "Microsoft.CodeAnalysis.CSharp/5.3.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-SQFNGQF4f7UfDXKxMzzGNMr3fjrPDIjLfmRvvVgDCw+dyvEHDaRfHuKA5q0Pr0/JW0Gcw89TxrxrS/MjwBvluQ==",
+      "path": "microsoft.codeanalysis.csharp/5.3.0",
+      "hashPath": "microsoft.codeanalysis.csharp.5.3.0.nupkg.sha512"
     }
   }
 }

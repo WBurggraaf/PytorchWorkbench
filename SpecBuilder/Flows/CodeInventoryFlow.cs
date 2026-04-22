@@ -8,9 +8,7 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
     [
         ".cs", ".fs", ".vb", ".xaml",
         ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".inl", ".cu",
-        ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx",
-        ".json", ".yml", ".yaml", ".xml", ".props", ".targets", ".csproj", ".sln",
-        ".md", ".txt", ".cmd", ".bat", ".ps1", ".sh", ".cmake", ".toml", ".lock"
+        ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx"
     ];
 
     private readonly string _workspaceRoot;
@@ -40,7 +38,7 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
     public string Name => "1. Build code inventory markdown";
 
     public string Description =>
-        "Scans the origin folder for code and config files, then writes a reusable markdown inventory.";
+        "Scans the origin folder for source-code files and writes a reusable markdown inventory.";
 
     public Task<FlowResult> ExecuteAsync()
     {
@@ -103,9 +101,7 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
         }
 
         var extension = GetExtensionKey(path);
-        return DefaultExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
-               fileName.EndsWith(".sln", StringComparison.OrdinalIgnoreCase);
+        return DefaultExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase);
     }
 
     private IReadOnlyList<string> LoadIgnorePatterns(out string? ignoreSource)
@@ -148,17 +144,6 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
 
     private static string GetExtensionKey(string path)
     {
-        var fileName = Path.GetFileName(path);
-        if (fileName.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-        {
-            return ".csproj";
-        }
-
-        if (fileName.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
-        {
-            return ".sln";
-        }
-
         var ext = Path.GetExtension(path);
         return string.IsNullOrEmpty(ext) ? "[no extension]" : ext.ToLowerInvariant();
     }

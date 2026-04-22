@@ -15,6 +15,7 @@ internal sealed class PipelineHost
             new CodeInventoryFlow(_appRoot),
             new OllamaLanguagesFlow(_appRoot),
             new OllamaExtensionAnalysisFlow(_appRoot),
+            new AstSpecLayersFlow(_appRoot),
         };
     }
 

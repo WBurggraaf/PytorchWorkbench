@@ -1,8 +1,18 @@
 {
   "version": 2,
-  "dgSpecHash": "XePvPyC1WbA=",
+  "dgSpecHash": "VWLJ+8LzheY=",
   "success": true,
   "projectFilePath": "C:\\github\\SpecBuilder\\SpecBuilder.csproj",
-  "expectedPackageFiles": [],
+  "expectedPackageFiles": [
+    "C:\\Users\\posit\\.nuget\\packages\\clangsharp\\20.1.2.4\\clangsharp.20.1.2.4.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\clangsharp.interop\\20.1.2.4\\clangsharp.interop.20.1.2.4.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\cppast\\0.24.0\\cppast.0.24.0.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\irony\\1.5.3\\irony.1.5.3.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\libclang\\20.1.2\\libclang.20.1.2.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\libclangsharp\\20.1.2\\libclangsharp.20.1.2.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\microsoft.codeanalysis.analyzers\\5.3.0-2.25625.1\\microsoft.codeanalysis.analyzers.5.3.0-2.25625.1.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\microsoft.codeanalysis.common\\5.3.0\\microsoft.codeanalysis.common.5.3.0.nupkg.sha512",
+    "C:\\Users\\posit\\.nuget\\packages\\microsoft.codeanalysis.csharp\\5.3.0\\microsoft.codeanalysis.csharp.5.3.0.nupkg.sha512"
+  ],
   "logs": []
 }
