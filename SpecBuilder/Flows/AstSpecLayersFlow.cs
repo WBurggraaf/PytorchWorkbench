@@ -2965,7 +2965,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return allDistances;
     }
 
-    private static Dictionary<string, int> DijkstraShortestPaths(string source, CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, ReferenceIndex referenceIndex, Dictionary<string, CanonicalAstFile> fileByPath)
+    private static Dictionary<string, int> DijkstraShortestPaths(string source, CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, ReferenceIndex referenceIndex, Dictionary<string, CanonicalAstFile> fileByPath, double targetReachability = 0.95)
     {
         var distances = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2982,9 +2982,16 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var maxDepth = Math.Min(30, Math.Max(5, document.Files.Count / 200));
         var edgesExamined = 0;
         var maxEdges = Math.Min(50000, document.Files.Count * 40);
+        var targetFileCount = (int)(document.Files.Count * targetReachability);
+        var discoveredCount = 1;
 
         while (pq.Count > 0 && edgesExamined < maxEdges)
         {
+            if (discoveredCount >= targetFileCount)
+            {
+                break;
+            }
+
             var (current, currentDist) = pq.Dequeue();
 
             if (!visited.Add(current))
@@ -3033,7 +3040,14 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                         var newDist = currentDist + cost;
                         if (newDist < distances[target])
                         {
+                            var wasUndiscovered = distances[target] == int.MaxValue;
                             distances[target] = newDist;
+
+                            if (wasUndiscovered)
+                            {
+                                discoveredCount++;
+                            }
+
                             candidates.Add((target, newDist));
                         }
                     }
