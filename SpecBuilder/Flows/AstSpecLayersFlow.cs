@@ -1474,22 +1474,37 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
     private static IReadOnlyList<ClusterRow> BuildClusters(CanonicalAstDocument document)
     {
+        var benchmark = new L5Benchmark();
+        benchmark.StartTotal();
+
         Console.WriteLine("[step4] L5: building graph with Dijkstra optimization");
         var clusters = new Dictionary<string, ClusterRow>(StringComparer.OrdinalIgnoreCase);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var symbolIndex = BuildSymbolIndex(document.Symbols);
 
         Console.WriteLine("[step4] L5: identifying hub nodes");
+        benchmark.StartPhase("hubs");
         var hubs = IdentifyHubNodes(document);
+        benchmark.EndPhase("hubs");
         Console.WriteLine($"[step4] L5: found {hubs.Count} hub nodes");
 
         Console.WriteLine("[step4] L5: computing shortest distances from hubs");
+        benchmark.StartPhase("dijkstra");
         var distances = ComputeDistancesFromHubs(document, symbolIndex, hubs);
+        benchmark.EndPhase("dijkstra");
 
         Console.WriteLine("[step4] L5: building distance-optimized graph");
+        benchmark.StartPhase("graph");
         var graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances);
+        benchmark.EndPhase("graph");
+        Console.WriteLine($"[step4] L5: graph has {graph.Values.Sum(v => v.Count)} edges");
 
-        var components = FindConnectedComponents(document.Files.Select(file => file.RelativePath), graph);
+        Console.WriteLine("[step4] L5: computing distance bands for micro-clustering");
+        var bands = ComputeDistanceBands(distances);
+
+        benchmark.StartPhase("components");
+        var components = FindConnectedComponentsWithBands(document.Files.Select(file => file.RelativePath), graph, bands);
+        benchmark.EndPhase("components");
         Console.WriteLine($"[step4] L5: components {components.Count}");
 
         for (var i = 0; i < components.Count; i++)
@@ -1517,6 +1532,9 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
             clusters[name + "|" + string.Join("|", files)] = cluster;
         }
+
+        benchmark.EndTotal();
+        benchmark.Report(document.Files.Count, hubs.Count, distances);
 
         return clusters.Values.ToList();
     }
@@ -2885,20 +2903,36 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var allDistances = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var referenceIndex = GetReferenceIndex(document);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        foreach (var hub in hubs)
+        Console.WriteLine($"[step4] L5: computing distances from {hubs.Count} hubs (parallel)");
+
+        var hubResults = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+        var lockObj = new object();
+        var parallelism = Math.Max(1, (int)Math.Ceiling(Environment.ProcessorCount * 0.75));
+
+        Parallel.ForEach(hubs, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, hub =>
         {
-            Console.WriteLine($"[step4] L5: dijkstra from hub {hub}");
             var distances = DijkstraShortestPaths(hub, document, symbolIndex, referenceIndex, fileByPath);
-
-            foreach (var kvp in distances)
+            lock (lockObj)
             {
-                if (!allDistances.ContainsKey(kvp.Key) || allDistances[kvp.Key] > kvp.Value)
+                hubResults[hub] = distances;
+            }
+        });
+
+        foreach (var kvp in hubResults)
+        {
+            foreach (var distKvp in kvp.Value)
+            {
+                if (!allDistances.ContainsKey(distKvp.Key) || allDistances[distKvp.Key] > distKvp.Value)
                 {
-                    allDistances[kvp.Key] = kvp.Value;
+                    allDistances[distKvp.Key] = distKvp.Value;
                 }
             }
         }
+
+        sw.Stop();
+        Console.WriteLine($"[step4] L5: dijkstra parallel completed in {sw.ElapsedMilliseconds}ms");
 
         return allDistances;
     }
@@ -2987,14 +3021,72 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return distances;
     }
 
+    private static (int DistanceThreshold, double EdgeWeightBias) AdaptiveThresholds(CanonicalAstDocument document, Dictionary<string, int> distances)
+    {
+        if (distances.Count == 0)
+        {
+            return (12, 0.0);
+        }
+
+        var validDistances = distances.Values.Where(d => d != int.MaxValue).ToList();
+        if (validDistances.Count == 0)
+        {
+            return (12, 0.0);
+        }
+
+        var avgDistance = validDistances.Average();
+        var maxDistance = validDistances.Max();
+        var reachability = (double)validDistances.Count / distances.Count;
+
+        Console.WriteLine($"[step4] L5: distance stats - avg={avgDistance:F1}, max={maxDistance}, reach={reachability:P1}");
+
+        var distanceThreshold = reachability switch
+        {
+            < 0.2 => Math.Min(8, (int)avgDistance + 2),
+            < 0.5 => Math.Min(12, (int)avgDistance + 3),
+            < 0.8 => Math.Min(16, (int)avgDistance + 4),
+            _ => Math.Min(20, (int)avgDistance + 5),
+        };
+
+        var edgeWeightBias = reachability switch
+        {
+            < 0.3 => 0.25,
+            < 0.6 => 0.15,
+            < 0.85 => 0.08,
+            _ => 0.0,
+        };
+
+        return (distanceThreshold, edgeWeightBias);
+    }
+
+    private static Dictionary<string, int> ComputeDistanceBands(Dictionary<string, int> distances)
+    {
+        var bands = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in distances)
+        {
+            var band = kvp.Value switch
+            {
+                <= 4 => 0,
+                <= 8 => 1,
+                <= 12 => 2,
+                <= 16 => 3,
+                _ => 4,
+            };
+            bands[kvp.Key] = band;
+        }
+        return bands;
+    }
+
     private static Dictionary<string, HashSet<string>> BuildFileGraphWithDijkstra(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, Dictionary<string, int> distances)
     {
-        Console.WriteLine("[step4] L5: building file graph with distance filtering");
+        Console.WriteLine("[step4] L5: building file graph with adaptive distance filtering");
         var referenceIndex = GetReferenceIndex(document);
         var adjacency = document.Files.ToDictionary(file => file.RelativePath, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var processed = 0;
-        var distanceThreshold = 12;
+
+        var (distanceThreshold, edgeWeightBias) = AdaptiveThresholds(document, distances);
+        Console.WriteLine($"[step4] L5: adaptive threshold={distanceThreshold}, bias={edgeWeightBias:P0}");
 
         foreach (var file in document.Files)
         {
@@ -3031,6 +3123,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                             {
                                 var targetFile = fileByPath.TryGetValue(target, out var resolved) ? resolved : null;
                                 var score = ScoreEdge(reference.Kind, sourceLanguage, sourceRole, targetFile?.Language, targetFile is null ? "module" : InferRole(targetFile), source, target, reference.Target);
+                                score = (int)(score * (1 + edgeWeightBias));
                                 candidateEdges.Add((target, reference.Kind, ClassifyReference(reference.Kind), reference.Evidence ?? reference.Kind, score));
                             }
                         }
@@ -3377,6 +3470,60 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return components;
     }
 
+    private static IReadOnlyList<HashSet<string>> FindConnectedComponentsWithBands(IEnumerable<string> nodes, Dictionary<string, HashSet<string>> adjacency, Dictionary<string, int> bands)
+    {
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var components = new List<HashSet<string>>();
+
+        foreach (var node in nodes)
+        {
+            if (!adjacency.ContainsKey(node))
+            {
+                continue;
+            }
+
+            if (!visited.Add(node))
+            {
+                continue;
+            }
+
+            var component = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var stack = new Stack<(string Node, int Band)>();
+            var nodeBand = bands.TryGetValue(node, out var b) ? b : 4;
+            stack.Push((node, nodeBand));
+
+            while (stack.Count > 0)
+            {
+                var (current, currentBand) = stack.Pop();
+                if (!component.Add(current))
+                {
+                    continue;
+                }
+
+                foreach (var neighbor in adjacency[current])
+                {
+                    if (!visited.Contains(neighbor))
+                    {
+                        var neighborBand = bands.TryGetValue(neighbor, out var nb) ? nb : 4;
+                        var bandDiff = Math.Abs(currentBand - neighborBand);
+
+                        if (bandDiff <= 1)
+                        {
+                            stack.Push((neighbor, neighborBand));
+                        }
+                    }
+                }
+            }
+
+            if (component.Count >= 2)
+            {
+                components.Add(component);
+            }
+        }
+
+        return components;
+    }
+
     private static string ClassifyReference(string kind)
     {
         return kind switch
@@ -3446,4 +3593,62 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     private sealed record ReferenceIndexCache(
         Dictionary<string, List<string>> Exact,
         Dictionary<string, List<string>> Tokens);
+
+    private sealed class L5Benchmark
+    {
+        private readonly System.Diagnostics.Stopwatch _totalSw = new();
+        private System.Diagnostics.Stopwatch _phaseSw = new();
+        private readonly Dictionary<string, long> _phases = new();
+        private string _currentPhase = "";
+
+        public void StartTotal()
+        {
+            _totalSw.Restart();
+        }
+
+        public void EndTotal()
+        {
+            _totalSw.Stop();
+        }
+
+        public void StartPhase(string name)
+        {
+            if (!string.IsNullOrEmpty(_currentPhase))
+            {
+                _phases[_currentPhase] = _phaseSw.ElapsedMilliseconds;
+            }
+            _currentPhase = name;
+            _phaseSw.Restart();
+        }
+
+        public void EndPhase(string name)
+        {
+            _phaseSw.Stop();
+            _phases[name] = _phaseSw.ElapsedMilliseconds;
+            _currentPhase = "";
+        }
+
+        public void Report(int fileCount, int hubCount, Dictionary<string, int> distances)
+        {
+            var reachable = distances.Values.Count(d => d != int.MaxValue);
+            var avgDist = reachable > 0 ? distances.Values.Where(d => d != int.MaxValue).Average() : 0;
+            var maxDist = reachable > 0 ? distances.Values.Where(d => d != int.MaxValue).Max() : 0;
+
+            Console.WriteLine("\n[step4] L5: === DIJKSTRA OPTIMIZATION REPORT ===");
+            Console.WriteLine($"[step4] L5: Files analyzed: {fileCount}");
+            Console.WriteLine($"[step4] L5: Hub nodes: {hubCount}");
+            Console.WriteLine($"[step4] L5: Reachable files: {reachable} ({(double)reachable/fileCount:P1})");
+            Console.WriteLine($"[step4] L5: Avg distance: {avgDist:F1} hops");
+            Console.WriteLine($"[step4] L5: Max distance: {maxDist} hops");
+
+            Console.WriteLine("\n[step4] L5: === PHASE TIMINGS ===");
+            foreach (var kvp in _phases.OrderByDescending(x => x.Value))
+            {
+                var pct = (double)kvp.Value / _totalSw.ElapsedMilliseconds * 100;
+                Console.WriteLine($"[step4] L5: {kvp.Key,-12} {kvp.Value,6}ms ({pct,5:F1}%)");
+            }
+
+            Console.WriteLine($"\n[step4] L5: === TOTAL TIME: {_totalSw.ElapsedMilliseconds}ms ===\n");
+        }
+    }
 }
