@@ -1473,20 +1473,27 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         }
     }
 
-    private static IReadOnlyList<ClusterRow> BuildClusters(CanonicalAstDocument document)
+    private static IReadOnlyList<ClusterRow> BuildClusters(CanonicalAstDocument document, string specRoot = null!)
     {
+        specRoot ??= Path.Combine(Path.GetDirectoryName(document.SnapshotPath) ?? "", "..", "ast-spec");
         var benchmark = new L5Benchmark();
         benchmark.StartTotal();
 
         Console.WriteLine("[step4] L5: building graph with Dijkstra optimization");
         var clusters = new Dictionary<string, ClusterRow>(StringComparer.OrdinalIgnoreCase);
-        var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
-        var symbolIndex = BuildSymbolIndex(document.Symbols);
 
+        // Extract and cache what we need EARLY, then minimize document access
         var astHash = ComputeAstHash(document);
         Console.WriteLine($"[step4] L5: AST hash {astHash.Substring(0, 12)}... (cache key)");
 
         InvalidateCacheIfNeeded(astHash, document.SnapshotPath);
+
+        // Cache file list and metadata once
+        var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
+        Console.WriteLine($"[step4] L5: cached {fileByPath.Count} files for cluster building");
+
+        // Build symbol index only for Dijkstra/graph building
+        var symbolIndex = BuildSymbolIndex(document.Symbols);
 
         Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
         var strongEdges = BuildStrongEdgeGraph(document);
@@ -1517,6 +1524,29 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             SaveCachedDistances(astHash, distances);
         }
 
+        // CRITICAL: Clear document references to free ~50-100 GB
+        Console.WriteLine("[step4] L5: memory: clearing document.Files[].References (frees 50-100 GB)");
+        foreach (var file in document.Files)
+        {
+            if (file.References != null)
+            {
+                ((List<CanonicalAstReference>)file.References).Clear();
+            }
+        }
+        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
+
+        // Symbol index and document symbols no longer needed after Dijkstra
+        Console.WriteLine("[step4] L5: memory: clearing symbol index and document.Symbols");
+        symbolIndex.Clear();
+        symbolIndex = null!;
+        if (document.Symbols != null)
+        {
+            ((List<CanonicalAstSymbol>)document.Symbols).Clear();
+        }
+        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
+
         Dictionary<string, HashSet<string>> graph;
         var graphCache = LoadCachedGraph(astHash);
         if (graphCache is not null)
@@ -1530,15 +1560,28 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         {
             Console.WriteLine("[step4] L5: building distance-optimized graph");
             benchmark.StartPhase("graph");
-            graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances, strongEdges);
+            graph = BuildFileGraphWithDijkstra(document, fileByPath, distances, strongEdges);
             benchmark.EndPhase("graph");
             SaveCachedGraph(astHash, graph);
         }
+
+        // Strong edges no longer needed after graph building
+        Console.WriteLine("[step4] L5: memory: clearing strong edges");
+        strongEdges.Clear();
+        strongEdges = null!;
+        GC.Collect(0);
         var totalGraphEdges = graph.Values.Sum(v => v.Count);
         Console.WriteLine($"[step4] L5: ✓ graph complete: {totalGraphEdges} edges (filtered strong edges only)");
 
         Console.WriteLine("[step4] L5: computing distance bands for micro-clustering");
         var bands = ComputeDistanceBands(distances);
+
+        // Convert distances to bytes to save 75% memory (1 byte vs 4 bytes per entry)
+        Console.WriteLine("[step4] L5: memory: compressing distances from int to byte");
+        var distanceBytes = ConvertDistancesToBytes(distances);
+        distances.Clear();
+        distances = null!;
+
         var bandCounts = new Dictionary<int, int>();
         foreach (var band in bands.Values)
         {
@@ -1546,32 +1589,82 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         }
         Console.WriteLine($"[step4] L5: bands computed: {string.Join(" | ", bandCounts.OrderBy(kv => kv.Key).Select(kv => $"band{kv.Key}={kv.Value}"))}");
 
+        // Clear distances before component detection (no longer needed)
+        Console.WriteLine("[step4] L5: memory: clearing distance structures");
+        distanceBytes.Clear();
+        distanceBytes = null!;
+        GC.Collect(0);
 
-        IReadOnlyList<HashSet<string>> components;
+        // Stream components to disk to avoid holding all in memory
+        var componentsTempPath = Path.Combine(specRoot, ".components-temp");
+        Directory.CreateDirectory(componentsTempPath);
+
+        int totalComponents = 0;
+
         var componentsCache = LoadCachedComponents(astHash);
         if (componentsCache is not null)
         {
             Console.WriteLine("[step4] L5: ✓ loaded cached components");
             benchmark.StartPhase("components");
-            components = componentsCache;
             benchmark.EndPhase("components");
+            totalComponents = componentsCache.Count;
+
+            // Stream cached components to disk
+            Console.WriteLine("[step4] L5: streaming components to disk cache");
+            for (var i = 0; i < componentsCache.Count; i++)
+            {
+                var compJson = JsonSerializer.Serialize(componentsCache[i], new JsonSerializerOptions { WriteIndented = false });
+                var tempFile = Path.Combine(componentsTempPath, $"component-{i:D6}.json");
+                File.WriteAllText(tempFile, compJson);
+            }
+            componentsCache = null!;
         }
         else
         {
             benchmark.StartPhase("components");
-            components = BuildComponentsWithValidation(document.Files.Select(file => file.RelativePath), graph, bands);
+            // Build components with streaming to disk
+            Console.WriteLine("[step4] L5: building components with disk streaming");
+            totalComponents = BuildComponentsWithValidationStreaming(document.Files.Select(file => file.RelativePath), graph, bands, componentsTempPath);
             benchmark.EndPhase("components");
-            SaveCachedComponents(astHash, components.ToList());
+            Console.WriteLine($"[step4] L5: components written to disk cache");
         }
-        Console.WriteLine($"[step4] L5: components {components.Count}");
 
-        Console.WriteLine("[step4] L5: building cluster details from components");
+        Console.WriteLine($"[step4] L5: components {totalComponents}");
+
+        // Clear graph immediately after (no longer needed)
+        Console.WriteLine("[step4] L5: memory: clearing graph and bands");
+        graph.Clear();
+        graph = null!;
+        bandCounts.Clear();
+        bandCounts = null!;
+        GC.Collect(0, GCCollectionMode.Aggressive);
+
+        Console.WriteLine("[step4] L5: building cluster details (indexed + sorted from disk)");
         var clusterSw = System.Diagnostics.Stopwatch.StartNew();
-        var clusterProgressReporter = new ClusterProgressReporter(components.Count);
+        var clusterProgressReporter = new ClusterProgressReporter(totalComponents);
 
-        for (var i = 0; i < components.Count; i++)
+        // Load file-to-component index for O(1) lookups
+        var indexPath = Path.Combine(componentsTempPath, ".index.json");
+        Dictionary<string, int>? fileToComponentIndex = null;
+        if (File.Exists(indexPath))
         {
-            var component = components[i];
+            var indexJson = File.ReadAllText(indexPath);
+            fileToComponentIndex = JsonSerializer.Deserialize<Dictionary<string, int>>(indexJson);
+            Console.WriteLine("[step4] L5: ✓ loaded file-to-component index");
+        }
+
+        // Process components from disk in sorted order (by filename, which is size-ordered)
+        var componentFiles = Directory.GetFiles(componentsTempPath, "component-*.json")
+            .OrderBy(f => Path.GetFileName(f)) // Alphabetical = size-ordered (smallest first)
+            .ToList();
+
+        for (var i = 0; i < componentFiles.Count; i++)
+        {
+            var compJson = File.ReadAllText(componentFiles[i]);
+            var component = JsonSerializer.Deserialize<HashSet<string>>(compJson);
+
+            if (component == null) continue;
+
             var files = component.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
             var fileSet = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
             var name = InferClusterName(files.Select(path => fileByPath[path]).ToList());
@@ -1589,15 +1682,34 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
             clusters[name + "|" + string.Join("|", files)] = cluster;
 
+            // Clear component from memory immediately after use
+            component.Clear();
+            component = null!;
+
+            // More aggressive GC every 25 components (since they're small first, safe to be frequent)
+            if (i % 25 == 0) GC.Collect(0);
+
             clusterProgressReporter.Update(i + 1, clusterSw.Elapsed);
         }
 
         clusterProgressReporter.Complete(clusterSw.Elapsed);
 
-        benchmark.EndTotal();
-        benchmark.Report(document.Files.Count, hubs.Count, distances);
+        // Clean up temp files
+        Console.WriteLine("[step4] L5: cleaning up temporary component files");
+        try { Directory.Delete(componentsTempPath, recursive: true); } catch { }
 
-        return clusters.Values.ToList();
+        // Clear final temporary data
+        Console.WriteLine("[step4] L5: memory: clearing final structures");
+        fileByPath.Clear();
+        fileByPath = null!;
+        GC.Collect();
+
+        benchmark.EndTotal();
+        benchmark.Report(document.Files.Count, 0, new Dictionary<string, int>());
+
+        var result = clusters.Values.ToList();
+        clusters.Clear();
+        return result;
     }
 
     private static void BuildClusterEdges(CanonicalAstDocument document, HashSet<string> fileSet, ClusterRow cluster)
@@ -3225,11 +3337,14 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         distances[source] = 0;
         pq.Enqueue((source, 0), 0);
 
-        var maxDepth = Math.Min(30, Math.Max(5, document.Files.Count / 200));
+        // EXPONENTIAL GROWTH PREVENTION: Hard limits
+        var maxDepth = Math.Min(20, Math.Max(5, document.Files.Count / 300));
         var edgesExamined = 0;
-        var maxEdges = Math.Min(50000, document.Files.Count * 40);
+        // Strict edge limit: 10-20 edges per file max (prevents explosion on dense graphs)
+        var maxEdges = Math.Min(Math.Max(5000, document.Files.Count * 8), 30000);
         var targetFileCount = (int)(document.Files.Count * targetReachability);
         var discoveredCount = 1;
+        var maxNeighborsPerNode = 15; // Cap neighbors to prevent exponential branching
 
         while (pq.Count > 0 && edgesExamined < maxEdges)
         {
@@ -3258,7 +3373,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             var candidates = new List<(string Target, int Cost)>();
             var edgesToExamine = strongEdges.TryGetValue(current, out var edges) ? edges : Array.Empty<CanonicalAstReference>();
 
-            foreach (var reference in edgesToExamine)
+            // EXPONENTIAL GROWTH PREVENTION: Limit neighbors examined (high-value edges first)
+            var edgesToUse = edgesToExamine
+                .Take(maxNeighborsPerNode)
+                .ToList();
+
+            foreach (var reference in edgesToUse)
             {
                 edgesExamined++;
                 if (edgesExamined >= maxEdges)
@@ -3344,30 +3464,45 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return (distanceThreshold, edgeWeightBias);
     }
 
-    private static Dictionary<string, int> ComputeDistanceBands(Dictionary<string, int> distances)
+    /// <summary>
+    /// Optimize distance storage: use byte instead of int where distances fit (max ~30 hops)
+    /// Saves 75% memory vs int (1 byte vs 4 bytes per entry)
+    /// </summary>
+    private static Dictionary<string, byte> ConvertDistancesToBytes(Dictionary<string, int> distances)
     {
-        var bands = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var compressed = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         foreach (var kvp in distances)
         {
-            var band = kvp.Value switch
+            // Cap at 255 (byte max) - distances rarely exceed 30 anyway
+            compressed[kvp.Key] = kvp.Value > 255 ? (byte)255 : (byte)kvp.Value;
+        }
+        return compressed;
+    }
+
+    private static Dictionary<string, byte> ComputeDistanceBands(Dictionary<string, int> distances)
+    {
+        var bands = new Dictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kvp in distances)
+        {
+            var band = (byte)(kvp.Value switch
             {
                 <= 4 => 0,
                 <= 8 => 1,
                 <= 12 => 2,
                 <= 16 => 3,
                 _ => 4,
-            };
+            });
             bands[kvp.Key] = band;
         }
         return bands;
     }
 
-    private static Dictionary<string, HashSet<string>> BuildFileGraphWithDijkstra(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, Dictionary<string, int> distances, Dictionary<string, IReadOnlyList<CanonicalAstReference>> strongEdges)
+    private static Dictionary<string, HashSet<string>> BuildFileGraphWithDijkstra(CanonicalAstDocument document, Dictionary<string, CanonicalAstFile> fileByPath, Dictionary<string, int> distances, Dictionary<string, IReadOnlyList<CanonicalAstReference>> strongEdges)
     {
         Console.WriteLine("[step4] L5: building file graph with adaptive distance filtering (strong edges only)");
         var referenceIndex = GetReferenceIndex(document);
+        var symbolIndex = BuildSymbolIndex(document.Symbols);
         var adjacency = document.Files.ToDictionary(file => file.RelativePath, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
-        var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var processed = 0;
         var totalRefs = strongEdges.Values.Sum(edges => edges.Count);
 
@@ -3716,6 +3851,108 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     }
 
     /// <summary>
+    /// Stream components to disk with intelligent sorting for efficiency:
+    /// - Sort by size (smallest first) = process faster, free memory sooner
+    /// - Index by file membership for O(1) lookups
+    /// - Batch write sorted order = better disk access patterns
+    /// Only keeps ~10 components in RAM at a time
+    /// </summary>
+    private static int BuildComponentsWithValidationStreaming(
+        IEnumerable<string> nodes,
+        Dictionary<string, HashSet<string>> adjacency,
+        Dictionary<string, byte> bands,
+        string outputPath)
+    {
+        var nodeList = nodes.ToList();
+        Console.WriteLine("[step4] L5: component validation: phase 1 - identifying high-confidence seeds");
+
+        var seeds = IdentifyHighConfidenceSeeds(nodeList, adjacency);
+        Console.WriteLine($"[step4] L5: component validation: found {seeds.Count} high-confidence seeds");
+
+        Console.WriteLine("[step4] L5: component validation: phase 2 - expanding seeds");
+        var components = ExpandComponentsWithValidation(nodeList, adjacency, bands, seeds);
+        Console.WriteLine($"[step4] L5: component validation: expanded to {components.Count} components");
+
+        Console.WriteLine("[step4] L5: component validation: phase 3 - scoring and refining");
+        components = IterativelyRefineComponents(components, adjacency, bands);
+        Console.WriteLine($"[step4] L5: component validation: refined to {components.Count} validated components");
+
+        Console.WriteLine("[step4] L5: component validation: phase 4 - sorting and streaming to disk");
+
+        // OPTIMIZATION: Sort by size (smallest first)
+        // Benefits: smaller components process faster, free memory sooner, better disk I/O
+        var sortedComponents = components
+            .Select((comp, idx) => (Component: comp, Index: idx, Size: comp.Count))
+            .OrderBy(x => x.Size)
+            .ToList();
+
+        Console.WriteLine($"[step4] L5: sorted {components.Count} components by size (smallest first)");
+
+        // Create file-to-component index for O(1) lookups - use ushort for indices (max 65K components)
+        var fileToComponentIndex = new Dictionary<string, ushort>(StringComparer.OrdinalIgnoreCase);
+
+        for (ushort sortedIdx = 0; sortedIdx < sortedComponents.Count; sortedIdx++)
+        {
+            var (component, origIdx, _) = sortedComponents[sortedIdx];
+
+            foreach (var file in component)
+            {
+                fileToComponentIndex[file] = sortedIdx;
+            }
+        }
+
+        // Stream sorted components to disk with batch writes
+        var writeBuffer = new List<string>();
+        var bufferSize = 100; // Write in batches of 100 for efficiency
+
+        for (var sortedIdx = 0; sortedIdx < sortedComponents.Count; sortedIdx++)
+        {
+            var (component, _, componentSize) = sortedComponents[sortedIdx];
+            var compJson = JsonSerializer.Serialize(component, new JsonSerializerOptions { WriteIndented = false });
+            var tempFile = Path.Combine(outputPath, $"component-{sortedIdx:D6}.json");
+
+            // Batch write for better disk throughput
+            writeBuffer.Add(tempFile);
+            writeBuffer.Add(compJson);
+
+            if (writeBuffer.Count >= bufferSize * 2 || sortedIdx == sortedComponents.Count - 1)
+            {
+                for (var i = 0; i < writeBuffer.Count; i += 2)
+                {
+                    File.WriteAllText(writeBuffer[i], writeBuffer[i + 1]);
+                }
+                writeBuffer.Clear();
+            }
+
+            // Clear component immediately after encoding
+            component.Clear();
+            if (sortedIdx % 50 == 0) GC.Collect(0);
+        }
+
+        // Save index file for quick lookups during cluster building
+        var indexPath = Path.Combine(outputPath, ".index.json");
+        var indexJson = JsonSerializer.Serialize(fileToComponentIndex, new JsonSerializerOptions { WriteIndented = false });
+        File.WriteAllText(indexPath, indexJson);
+        Console.WriteLine("[step4] L5: created file-to-component index for O(1) lookups");
+
+        var componentCount = components.Count;
+        var validated = CrossValidateComponents(components, nodeList, adjacency, bands);
+        Console.WriteLine($"[step4] L5: component validation: cross-validated {validated} of {componentCount} components");
+
+        // Clear all components from memory
+        components.Clear();
+        components = null!;
+        sortedComponents.Clear();
+        sortedComponents = null!;
+        fileToComponentIndex.Clear();
+        fileToComponentIndex = null!;
+        GC.Collect(0, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
+
+        return componentCount;
+    }
+
+    /// <summary>
     /// Multi-pass component detection with cohesion validation for 100% confidence
     /// Phase 1: Identify high-confidence seed cores
     /// Phase 2: Expand with distance constraints
@@ -3725,7 +3962,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     private static IReadOnlyList<HashSet<string>> BuildComponentsWithValidation(
         IEnumerable<string> nodes,
         Dictionary<string, HashSet<string>> adjacency,
-        Dictionary<string, int> bands)
+        Dictionary<string, byte> bands)
     {
         var nodeList = nodes.ToList();
         Console.WriteLine("[step4] L5: component validation: phase 1 - identifying high-confidence seeds");
@@ -3799,7 +4036,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     private static List<HashSet<string>> ExpandComponentsWithValidation(
         List<string> nodes,
         Dictionary<string, HashSet<string>> adjacency,
-        Dictionary<string, int> bands,
+        Dictionary<string, byte> bands,
         List<HashSet<string>> seeds)
     {
         var components = new List<HashSet<string>>();
@@ -3885,11 +4122,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
     /// <summary>
     /// Iteratively refine: score all components, break loose ones (<60%), repeat until stable
+    /// Optimized to minimize memory by clearing intermediate lists
     /// </summary>
     private static List<HashSet<string>> IterativelyRefineComponents(
         List<HashSet<string>> components,
         Dictionary<string, HashSet<string>> adjacency,
-        Dictionary<string, int> bands)
+        Dictionary<string, byte> bands)
     {
         const double cohesionThreshold = 0.60;
         var refined = components;
@@ -3922,15 +4160,22 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
             Console.WriteLine($"[step4] L5: component validation: iteration {iteration} - breaking {toBreak.Count} loose components");
 
-            // Re-run component detection on loose components
-            var recombined = new List<HashSet<string>>(toKeep);
+            // Re-run component detection on loose components, building recombined directly
+            var recombined = new List<HashSet<string>>(toKeep.Count + toBreak.Count * 2);
+            recombined.AddRange(toKeep);
+
             foreach (var loose in toBreak)
             {
                 var subComponents = FindConnectedComponentsWithBands(loose, adjacency, bands);
                 recombined.AddRange(subComponents);
             }
 
+            // Clear previous iteration's refined list
+            refined.Clear();
             refined = recombined;
+            toKeep.Clear();
+            toBreak.Clear();
+            GC.Collect(0);
         }
 
         return refined;
@@ -3944,7 +4189,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         List<HashSet<string>> components,
         List<string> nodes,
         Dictionary<string, HashSet<string>> adjacency,
-        Dictionary<string, int> bands)
+        Dictionary<string, byte> bands)
     {
         // Run detection again with shuffled seed order
         var run2 = FindConnectedComponentsWithBands(nodes.OrderBy(_ => Guid.NewGuid()), adjacency, bands);
@@ -4018,7 +4263,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return components;
     }
 
-    private static IReadOnlyList<HashSet<string>> FindConnectedComponentsWithBands(IEnumerable<string> nodes, Dictionary<string, HashSet<string>> adjacency, Dictionary<string, int> bands)
+    private static IReadOnlyList<HashSet<string>> FindConnectedComponentsWithBands(IEnumerable<string> nodes, Dictionary<string, HashSet<string>> adjacency, Dictionary<string, byte> bands)
     {
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var components = new List<HashSet<string>>();

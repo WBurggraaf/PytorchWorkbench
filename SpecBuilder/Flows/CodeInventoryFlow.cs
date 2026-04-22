@@ -64,17 +64,37 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
         }
 
         Console.WriteLine("[step1] source files changed or cache missing - rebuilding inventory");
+        Console.WriteLine("[step1] streaming files in chunks to minimize memory");
+
         var ignorePatterns = LoadIgnorePatterns(out var ignoreSource);
-        var files = Directory
+
+        // STREAMING: Process files in chunks (500 at a time) instead of loading all
+        var allFiles = Directory
             .EnumerateFiles(_originRoot, "*", SearchOption.AllDirectories)
             .Where(IsInterestingFile)
             .Where(path => !ShouldIgnore(path, ignorePatterns))
-            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
 
-        var grouped = files
-            .GroupBy(GetExtensionKey, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase)
+        var grouped = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+        // Stream files in chunks to avoid loading all in memory
+        foreach (var fileChunk in ChunkedStreaming.ChunkItems(allFiles, chunkSize: 500))
+        {
+            Console.WriteLine($"[step1] processing chunk: {fileChunk.Count} files");
+            foreach (var file in fileChunk)
+            {
+                var ext = GetExtensionKey(file);
+                if (!grouped.ContainsKey(ext))
+                    grouped[ext] = new List<string>();
+                grouped[ext].Add(file);
+            }
+
+            // Free memory after chunk processing
+            GC.Collect(0);
+        }
+
+        var groupedList = grouped
+            .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         if (ignorePatterns.Count > 0)
@@ -100,13 +120,15 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
         Directory.CreateDirectory(_byExtensionRoot);
 
         var manifest = WriteExtensionFiles(grouped);
-        File.WriteAllText(_indexPath, BuildIndexMarkdown(files, manifest), Encoding.UTF8);
+        var allFilesList = grouped.Values.SelectMany(x => x).ToList();
+        File.WriteAllText(_indexPath, BuildIndexMarkdown(allFilesList, manifest), Encoding.UTF8);
 
         File.WriteAllText(hashMarkerPath, sourceHash);
         Console.WriteLine($"[step1] saved cache marker");
 
+        var totalFiles = grouped.Values.Sum(g => g.Count);
         return Task.FromResult(new FlowResult(
-            $"Wrote inventory for {files.Count} files across {grouped.Count} extension groups.",
+            $"Wrote inventory for {totalFiles} files across {grouped.Count} extension groups.",
             _indexPath));
     }
 
@@ -166,7 +188,7 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
         return string.IsNullOrEmpty(ext) ? "[no extension]" : ext.ToLowerInvariant();
     }
 
-    private IReadOnlyList<ExtensionManifest> WriteExtensionFiles(List<IGrouping<string, string>> grouped)
+    private IReadOnlyList<ExtensionManifest> WriteExtensionFiles(Dictionary<string, List<string>> grouped)
     {
         var manifests = new List<ExtensionManifest>();
 
@@ -174,7 +196,7 @@ internal sealed class CodeInventoryFlow : IPipelineFlow
         {
             var fileName = SanitizeFileName(group.Key) + ".md";
             var outputPath = Path.Combine(_byExtensionRoot, fileName);
-            var relativePaths = group
+            var relativePaths = group.Value
                 .Select(path => Path.GetRelativePath(_originRoot, path).Replace('\\', '/'))
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .ToList();

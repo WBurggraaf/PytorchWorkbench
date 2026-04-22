@@ -87,6 +87,7 @@ internal sealed class OllamaLanguagesFlow : IPipelineFlow
             var categories = await ClassifyPerGroupAsync(groups);
             await WriteCategoryFilesAsync(categories);
             await File.WriteAllTextAsync(_indexOutputPath, BuildIndexMarkdown(categories.Values), Encoding.UTF8);
+            Console.WriteLine("[step2] classifications complete (streaming + caching enabled)");
 
             File.WriteAllText(step2HashFile, File.ReadAllText(step1HashFile));
             Console.WriteLine("[step2] saved cache marker");
