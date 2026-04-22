@@ -65,6 +65,13 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         Console.WriteLine("[step4] building layered spec markdown");
         var report = BuildLayeredSpec(document);
 
+        // After BuildLayeredSpec (which calls AppendLayer5 → GetClusters),
+        // document.References are already cleared and document is cached. Clear remaining collections.
+        Console.WriteLine("[step4] memory: clearing cached document collections after clustering");
+        ClearDocumentMajorCollections(document);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
+
         var snapshotStem = Path.GetFileNameWithoutExtension(snapshotPath);
         var outputPath = Path.Combine(_specRoot, $"{snapshotStem}-ast-spec.md");
         Console.WriteLine($"[step4] writing main spec to {outputPath}");
@@ -78,21 +85,31 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         Console.WriteLine("[step4] writing subsystem pages");
         await WriteSubsystemPagesAsync(document);
         GC.Collect(0);
+        GC.WaitForPendingFinalizers();
 
         Console.WriteLine("[step4] writing hierarchy pages");
         await WriteHierarchyPagesAsync(document);
         GC.Collect(0);
+        GC.WaitForPendingFinalizers();
 
         Console.WriteLine("[step4] writing C4 pages");
         await WriteC4PagesAsync(document);
         GC.Collect(0);
+        GC.WaitForPendingFinalizers();
 
         Console.WriteLine("[step4] writing fact diff");
         await WriteFactDiffAsync(document);
         GC.Collect(0);
+        GC.WaitForPendingFinalizers();
 
         Console.WriteLine("[step4] writing landing page");
         await WriteLandingPageAsync(document);
+
+        // Final cleanup
+        ClusterCache.Clear();
+        FileMetadataCache.Clear();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
+        GC.WaitForPendingFinalizers();
 
         return new FlowResult("Wrote layered AST spec report.", outputPath);
     }
@@ -402,9 +419,28 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         Console.WriteLine("[step4] L5: building cluster cache");
         var clusters = BuildClusters(document);
-        ClusterCache[key] = clusters;
+
+        // Save immediately to disk to reduce memory pressure
+        Console.WriteLine("[step4] L5: saving clusters to disk cache immediately");
         SaveClusterCache(cachePath, clusters);
-        Console.WriteLine($"[step4] L5: cached {clusters.Count} clusters");
+
+        // Keep in memory cache only if small (<100 clusters), otherwise discard to save RAM
+        if (clusters.Count < 100)
+        {
+            ClusterCache[key] = clusters;
+            Console.WriteLine($"[step4] L5: cached {clusters.Count} clusters in memory");
+        }
+        else
+        {
+            Console.WriteLine($"[step4] L5: {clusters.Count} clusters saved to disk (too large for memory cache)");
+            // Reload from disk for this call
+            var reloaded = LoadClusterCache(cachePath);
+            if (reloaded is not null)
+            {
+                ClearDocumentMajorCollections(document);
+                return reloaded;
+            }
+        }
 
         // Clear document collections to free 200+ GB for subsequent write operations
         ClearDocumentMajorCollections(document);
@@ -1776,6 +1812,8 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         var result = clusters.Values.ToList();
         clusters.Clear();
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive);
+        Console.WriteLine($"[step4] L5: cluster building complete, streaming to cache");
         return result;
     }
 
