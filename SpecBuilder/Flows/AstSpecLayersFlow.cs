@@ -2909,7 +2909,13 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         var hubResults = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         var lockObj = new object();
+        var progressLock = new object();
+        var completedCount = 0;
         var parallelism = Math.Max(1, (int)Math.Ceiling(Environment.ProcessorCount * 0.75));
+        var lastProgressTime = sw.Elapsed;
+
+        var progressReporter = new HubProgressReporter(hubs.Count);
+        progressReporter.Start();
 
         Parallel.ForEach(hubs, new ParallelOptions { MaxDegreeOfParallelism = parallelism }, hub =>
         {
@@ -2918,7 +2924,29 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             {
                 hubResults[hub] = distances;
             }
+
+            lock (progressLock)
+            {
+                completedCount++;
+                var shouldReport = completedCount % Math.Max(1, hubs.Count / 100) == 0 ||
+                                   (sw.Elapsed - lastProgressTime).TotalMilliseconds >= 1000 ||
+                                   completedCount == hubs.Count;
+
+                if (shouldReport)
+                {
+                    var elapsed = sw.Elapsed;
+                    var rate = completedCount / elapsed.TotalSeconds;
+                    var remaining = hubs.Count - completedCount;
+                    var eta = remaining > 0 ? TimeSpan.FromSeconds(remaining / rate) : TimeSpan.Zero;
+                    var percentage = (completedCount * 100) / hubs.Count;
+
+                    progressReporter.Update(completedCount, elapsed, eta, percentage);
+                    lastProgressTime = sw.Elapsed;
+                }
+            }
         });
+
+        progressReporter.Complete();
 
         foreach (var kvp in hubResults)
         {
@@ -2932,7 +2960,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         }
 
         sw.Stop();
-        Console.WriteLine($"[step4] L5: dijkstra parallel completed in {sw.ElapsedMilliseconds}ms");
+        Console.WriteLine($"[step4] L5: dijkstra parallel completed in {sw.ElapsedMilliseconds}ms ({hubs.Count} hubs)");
 
         return allDistances;
     }
@@ -3593,6 +3621,55 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
     private sealed record ReferenceIndexCache(
         Dictionary<string, List<string>> Exact,
         Dictionary<string, List<string>> Tokens);
+
+    private sealed class HubProgressReporter
+    {
+        private readonly int _totalHubs;
+        private System.Threading.Timer? _timer;
+        private int _lastReportedCount = 0;
+        private System.Diagnostics.Stopwatch _startTime = System.Diagnostics.Stopwatch.StartNew();
+
+        public HubProgressReporter(int totalHubs)
+        {
+            _totalHubs = totalHubs;
+        }
+
+        public void Start()
+        {
+            _startTime.Restart();
+        }
+
+        public void Update(int completed, TimeSpan elapsed, TimeSpan eta, int percentage)
+        {
+            if (completed == _lastReportedCount)
+            {
+                return;
+            }
+
+            _lastReportedCount = completed;
+            var rate = completed / Math.Max(0.1, elapsed.TotalSeconds);
+            var progressBar = BuildProgressBar(percentage, 40);
+
+            Console.WriteLine($"[step4] L5: dijkstra {progressBar} {percentage,3}% ({completed,5}/{_totalHubs,-5}) " +
+                            $"{rate:F1} hubs/s ETA {eta.Hours:D2}:{eta.Minutes:D2}:{eta.Seconds:D2}");
+        }
+
+        public void Complete()
+        {
+            if (_timer != null)
+            {
+                _timer.Dispose();
+                _timer = null;
+            }
+        }
+
+        private static string BuildProgressBar(int percentage, int width)
+        {
+            var filled = (percentage * width) / 100;
+            var empty = width - filled;
+            return $"[{new string('█', filled)}{new string(' ', empty)}]";
+        }
+    }
 
     private sealed class L5Benchmark
     {
