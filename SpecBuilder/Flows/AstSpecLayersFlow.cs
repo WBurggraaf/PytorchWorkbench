@@ -1482,6 +1482,11 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var symbolIndex = BuildSymbolIndex(document.Symbols);
 
+        Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
+        var strongEdges = BuildStrongEdgeGraph(document);
+        var strongEdgesCount = strongEdges.Values.Sum(edges => edges.Count);
+        Console.WriteLine($"[step4] L5: strong edges: {strongEdgesCount} (reduced from ~160K+)");
+
         Console.WriteLine("[step4] L5: identifying hub nodes");
         benchmark.StartPhase("hubs");
         var hubs = IdentifyHubNodes(document);
@@ -1490,12 +1495,12 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
 
         Console.WriteLine("[step4] L5: computing shortest distances from hubs");
         benchmark.StartPhase("dijkstra");
-        var distances = ComputeDistancesFromHubs(document, symbolIndex, hubs);
+        var distances = ComputeDistancesFromHubs(document, symbolIndex, hubs, strongEdges);
         benchmark.EndPhase("dijkstra");
 
         Console.WriteLine("[step4] L5: building distance-optimized graph");
         benchmark.StartPhase("graph");
-        var graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances);
+        var graph = BuildFileGraphWithDijkstra(document, symbolIndex, distances, strongEdges);
         benchmark.EndPhase("graph");
         Console.WriteLine($"[step4] L5: graph has {graph.Values.Sum(v => v.Count)} edges");
 
@@ -2898,7 +2903,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return hubs.Count > 0 ? hubs : document.Files.Take(Math.Max(1, document.Files.Count / 100)).Select(f => f.RelativePath).ToList();
     }
 
-    private static Dictionary<string, int> ComputeDistancesFromHubs(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, IReadOnlyList<string> hubs)
+    private static Dictionary<string, int> ComputeDistancesFromHubs(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, IReadOnlyList<string> hubs, Dictionary<string, IReadOnlyList<CanonicalAstReference>> strongEdges)
     {
         var allDistances = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
@@ -2906,10 +2911,6 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
         Console.WriteLine($"[step4] L5: computing distances from {hubs.Count} hubs (parallel)");
-        Console.WriteLine("[step4] L5: building strong edge graph (defines + call only)");
-        var strongEdges = BuildStrongEdgeGraph(document);
-        var strongEdgesBuildTime = sw.ElapsedMilliseconds;
-        Console.WriteLine($"[step4] L5: strong edge graph built in {strongEdgesBuildTime}ms");
 
         var hubResults = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
         var lockObj = new object();
@@ -3139,55 +3140,58 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
         return bands;
     }
 
-    private static Dictionary<string, HashSet<string>> BuildFileGraphWithDijkstra(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, Dictionary<string, int> distances)
+    private static Dictionary<string, HashSet<string>> BuildFileGraphWithDijkstra(CanonicalAstDocument document, Dictionary<string, HashSet<string>> symbolIndex, Dictionary<string, int> distances, Dictionary<string, IReadOnlyList<CanonicalAstReference>> strongEdges)
     {
-        Console.WriteLine("[step4] L5: building file graph with adaptive distance filtering");
+        Console.WriteLine("[step4] L5: building file graph with adaptive distance filtering (strong edges only)");
         var referenceIndex = GetReferenceIndex(document);
         var adjacency = document.Files.ToDictionary(file => file.RelativePath, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase), StringComparer.OrdinalIgnoreCase);
         var fileByPath = document.Files.ToDictionary(file => file.RelativePath, StringComparer.OrdinalIgnoreCase);
         var processed = 0;
+        var totalRefs = strongEdges.Values.Sum(edges => edges.Count);
 
         var (distanceThreshold, edgeWeightBias) = AdaptiveThresholds(document, distances);
         Console.WriteLine($"[step4] L5: adaptive threshold={distanceThreshold}, bias={edgeWeightBias:P0}");
+        Console.WriteLine($"[step4] L5: processing {totalRefs} strong edges across {document.Files.Count} files");
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var filesSeen = 0;
+        var graphProgressReporter = new GraphProgressReporter(totalRefs);
 
         foreach (var file in document.Files)
         {
+            filesSeen++;
             var source = file.RelativePath;
             var sourceLanguage = file.Language;
             var sourceRole = InferRole(file);
             var sourceDistance = distances.TryGetValue(source, out var d) ? d : int.MaxValue;
             var candidateEdges = new List<(string Target, string Kind, string Category, string Evidence, int Score)>();
 
-            foreach (var reference in file.References)
+            var edgesToProcess = strongEdges.TryGetValue(source, out var edges) ? edges : Array.Empty<CanonicalAstReference>();
+
+            foreach (var reference in edgesToProcess)
             {
                 if (reference.Target is null)
                 {
                     continue;
                 }
 
-                if (reference.Kind is "include" or "using" or "import" or "call" or "type" or "defines")
+                processed++;
+                graphProgressReporter.Update(processed, filesSeen, document.Files.Count, sw.Elapsed);
+
+                var targets = ResolveReferenceTargets(referenceIndex, symbolIndex, reference.Target);
+                foreach (var target in targets)
                 {
-                    processed++;
-                    if (processed == 1 || processed % 5000 == 0)
+                    if (!source.Equals(target, StringComparison.OrdinalIgnoreCase))
                     {
-                        Console.WriteLine($"[step4] L5: graph refs {processed}");
-                    }
+                        var targetDistance = distances.TryGetValue(target, out var td) ? td : int.MaxValue;
 
-                    var targets = ResolveReferenceTargets(referenceIndex, symbolIndex, reference.Target);
-                    foreach (var target in targets)
-                    {
-                        if (!source.Equals(target, StringComparison.OrdinalIgnoreCase))
+                        if (sourceDistance != int.MaxValue && targetDistance != int.MaxValue &&
+                            sourceDistance <= distanceThreshold && targetDistance <= distanceThreshold)
                         {
-                            var targetDistance = distances.TryGetValue(target, out var td) ? td : int.MaxValue;
-
-                            if (sourceDistance != int.MaxValue && targetDistance != int.MaxValue &&
-                                sourceDistance <= distanceThreshold && targetDistance <= distanceThreshold)
-                            {
-                                var targetFile = fileByPath.TryGetValue(target, out var resolved) ? resolved : null;
-                                var score = ScoreEdge(reference.Kind, sourceLanguage, sourceRole, targetFile?.Language, targetFile is null ? "module" : InferRole(targetFile), source, target, reference.Target);
-                                score = (int)(score * (1 + edgeWeightBias));
-                                candidateEdges.Add((target, reference.Kind, ClassifyReference(reference.Kind), reference.Evidence ?? reference.Kind, score));
-                            }
+                            var targetFile = fileByPath.TryGetValue(target, out var resolved) ? resolved : null;
+                            var score = ScoreEdge(reference.Kind, sourceLanguage, sourceRole, targetFile?.Language, targetFile is null ? "module" : InferRole(targetFile), source, target, reference.Target);
+                            score = (int)(score * (1 + edgeWeightBias));
+                            candidateEdges.Add((target, reference.Kind, ClassifyReference(reference.Kind), reference.Evidence ?? reference.Kind, score));
                         }
                     }
                 }
@@ -3200,6 +3204,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             }
         }
 
+        graphProgressReporter.Complete(processed, sw.Elapsed);
         return adjacency;
     }
 
@@ -3695,6 +3700,53 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
                 _timer.Dispose();
                 _timer = null;
             }
+        }
+
+        private static string BuildProgressBar(int percentage, int width)
+        {
+            var filled = (percentage * width) / 100;
+            var empty = width - filled;
+            return $"[{new string('█', filled)}{new string(' ', empty)}]";
+        }
+    }
+
+    private sealed class GraphProgressReporter
+    {
+        private readonly int _totalRefs;
+        private int _lastReportedCount = 0;
+        private System.Diagnostics.Stopwatch _startTime = System.Diagnostics.Stopwatch.StartNew();
+        private TimeSpan _lastReportTime = TimeSpan.Zero;
+
+        public GraphProgressReporter(int totalRefs)
+        {
+            _totalRefs = totalRefs;
+            _startTime.Restart();
+        }
+
+        public void Update(int processed, int filesSeen, int totalFiles, TimeSpan elapsed)
+        {
+            if (processed == _lastReportedCount || (elapsed - _lastReportTime).TotalMilliseconds < 1000)
+            {
+                return;
+            }
+
+            _lastReportedCount = processed;
+            _lastReportTime = elapsed;
+
+            var percentage = _totalRefs > 0 ? (processed * 100) / _totalRefs : 0;
+            var rate = processed / Math.Max(0.1, elapsed.TotalSeconds);
+            var remaining = _totalRefs - processed;
+            var eta = remaining > 0 ? TimeSpan.FromSeconds(remaining / Math.Max(0.1, rate)) : TimeSpan.Zero;
+            var progressBar = BuildProgressBar(percentage, 40);
+
+            Console.WriteLine($"[step4] L5: graph   {progressBar} {percentage,3}% ({processed,6}/{_totalRefs,-6}) " +
+                            $"{rate:F1} refs/s | file {filesSeen}/{totalFiles} | ETA {eta.Hours:D2}:{eta.Minutes:D2}:{eta.Seconds:D2}");
+        }
+
+        public void Complete(int processed, TimeSpan elapsed)
+        {
+            var rate = processed / Math.Max(0.1, elapsed.TotalSeconds);
+            Console.WriteLine($"[step4] L5: graph   completed: {processed}/{_totalRefs} refs in {elapsed.TotalSeconds:F1}s ({rate:F1} refs/s)");
         }
 
         private static string BuildProgressBar(int percentage, int width)
