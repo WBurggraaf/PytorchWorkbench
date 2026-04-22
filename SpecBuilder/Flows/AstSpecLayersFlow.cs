@@ -1095,21 +1095,23 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             return File.WriteAllTextAsync(path, BuildScenarioPage(document, scenario), Encoding.UTF8);
         });
 
-        var clusters = GetClusters(document).ToList();
+        var clusters = GetClusters(document)
+            .Where(c => !(c.Name == "Generic Cluster" && c.Files.Count == 1))
+            .ToList();
         Console.WriteLine($"[step4] hierarchy pages: relationship clusters {clusters.Count}");
-        await ProcessInBatchesAsync(clusters, _parallelism, cluster =>
+        await ProcessInBatchesAsync(clusters, 1, cluster =>
         {
-            Console.WriteLine($"[step4] hierarchy pages: relationship {cluster.Name}");
             var safe = MakeSafeFileName(cluster.Name);
             var path = Path.Combine(relationshipsRoot, $"{safe}.md");
             return File.WriteAllTextAsync(path, BuildRelationshipPage(cluster), Encoding.UTF8);
         });
 
-        var components = BuildComponentSignals(document).ToList();
+        var components = BuildComponentSignals(document)
+            .Where(c => !(c.Name == "Generic Cluster" && c.Files.Count == 1))
+            .ToList();
         Console.WriteLine($"[step4] hierarchy pages: components {components.Count}");
-        await ProcessInBatchesAsync(components, _parallelism, component =>
+        await ProcessInBatchesAsync(components, 1, component =>
         {
-            Console.WriteLine($"[step4] hierarchy pages: component {component.Name}");
             var safe = MakeSafeFileName(component.Name);
             var path = Path.Combine(componentsRoot, $"{safe}.md");
             return File.WriteAllTextAsync(path, BuildComponentPage(component), Encoding.UTF8);
