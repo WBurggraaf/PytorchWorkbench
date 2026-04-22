@@ -1106,9 +1106,7 @@ internal sealed class AstSpecLayersFlow : IPipelineFlow
             return File.WriteAllTextAsync(path, BuildRelationshipPage(cluster), Encoding.UTF8);
         });
 
-        var components = BuildComponentSignals(document)
-            .Where(c => !(c.Name == "Generic Cluster" && c.Files.Count == 1))
-            .ToList();
+        var components = BuildComponentSignals(document).ToList();
         Console.WriteLine($"[step4] hierarchy pages: components {components.Count}");
         await ProcessInBatchesAsync(components, 1, component =>
         {
