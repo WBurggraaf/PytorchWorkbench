@@ -42,6 +42,8 @@ internal sealed class OllamaExtensionAnalysisFlow : IPipelineFlow
                 return new FlowResult($"Missing origin file index: {_indexPath}. Run step 1 first.", _indexPath);
             }
 
+            Directory.CreateDirectory(_outputRoot);
+
             var generatedRoot = Path.GetDirectoryName(_indexPath) ?? _indexPath;
             var step2HashFile = Path.Combine(generatedRoot, ".step2-hash");
             var step3HashFile = Path.Combine(generatedRoot, ".step3-hash");
